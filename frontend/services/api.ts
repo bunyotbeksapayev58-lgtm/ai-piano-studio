@@ -77,13 +77,7 @@ export interface TokenResponse {
   user: UserResponse;
 }
 
-const CLOUD_TUNNEL = "https://impact-potter-but-carefully.trycloudflare.com/api";
-const API_BASE: string =
-  typeof window !== "undefined" &&
-  window.location.hostname !== "localhost" &&
-  window.location.hostname !== "127.0.0.1"
-    ? CLOUD_TUNNEL
-    : "/api";
+const API_BASE: string = "/api";
 const TOKEN_KEY = "ai_piano_token";
 const USER_KEY = "ai_piano_user";
 
