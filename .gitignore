@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+backend/venv/
+frontend/node_modules/
+
+# Next.js build
+frontend/.next/
+frontend/out/
+.next/
+
+# Python cache & test files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+.pytest_cache/
+
+# User uploads & temporary files
+backend/uploads/*
+!backend/uploads/.gitkeep
+backend/temp/*
+!backend/temp/.gitkeep
+backend/outputs/*
+!backend/outputs/.gitkeep
+!backend/outputs/demo_piano_video.mp4
+
+# SQLite local database
+backend/*.db
+backend/*.db-journal
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Large SoundFont binary (downloaded via script / setup)
+backend/soundfonts/*.sf2
+!backend/soundfonts/.gitkeep
+
+# System & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
