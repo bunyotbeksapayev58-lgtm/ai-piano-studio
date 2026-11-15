@@ -29,9 +29,12 @@ class PianoSynthesizer:
             cmd = [
                 fluidsynth_bin,
                 "-ni",
+                "-q",
                 "-g", "1.2",
-                "-F", str(output_wav_path),
+                "-R", "1",
+                "-C", "0",
                 "-r", "44100",
+                "-F", str(output_wav_path),
                 str(self.soundfont_path),
                 str(midi_path)
             ]
