@@ -11,7 +11,7 @@ import {
   HelpCircle,
   User,
 } from "lucide-react";
-import { UserResponse } from "@/services/api";
+import { UserResponse, api } from "@/services/api";
 
 export type NavTab = "dashboard" | "new-project" | "projects" | "studio" | "settings" | "help";
 
@@ -33,9 +33,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [engineStatus, setEngineStatus] = useState<"checking" | "online" | "offline">("checking");
 
   useEffect(() => {
-    fetch("/api/projects")
-      .then((res) => {
-        if (res.ok) setEngineStatus("online");
+    api.getProjects()
+      .then((data) => {
+        if (Array.isArray(data)) setEngineStatus("online");
         else setEngineStatus("offline");
       })
       .catch(() => setEngineStatus("offline"));
