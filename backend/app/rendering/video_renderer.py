@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Callable, Optional, Tuple
 from app.core.config import settings
 from app.midi.midi_generator import MidiGenerator
+from app.rendering.hand_animator import HandAnimator
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class VideoRenderer:
         self.lookahead = lookahead_seconds
         
         # Geometry layout
-        self.keyboard_top = 560
+        self.keyboard_top = 540
         self.keyboard_bottom = 710
         self.white_key_height = self.keyboard_bottom - self.keyboard_top
         self.black_key_height = int(self.white_key_height * 0.62)
@@ -33,6 +34,14 @@ class VideoRenderer:
         
         # Calculate 88-key mapping (MIDI 21 to 108)
         self._init_keyboard_geometry()
+
+        # Initialize animated hands engine
+        self.hand_animator = HandAnimator(
+            width=self.width,
+            height=self.height,
+            keyboard_top=self.keyboard_top,
+            keyboard_bottom=self.keyboard_bottom
+        )
 
     def _init_keyboard_geometry(self):
         """
@@ -69,7 +78,7 @@ class VideoRenderer:
                 self.white_keys.append(geom)
                 white_idx += 1
 
-        # Now place black keys between white keys
+        # Place black keys between white keys
         for midi in range(21, 109):
             is_black = is_black_table[midi % 12]
             if is_black:
@@ -105,13 +114,12 @@ class VideoRenderer:
         progress_callback: Optional[Callable[[float, str], None]] = None
     ) -> Path:
         """
-        Renders the complete 720p 30fps MP4 falling notes animation synchronized with synthesized audio.
-        Streams frames frame-by-frame directly into FFmpeg stdin pipe (zero RAM bloat).
+        Renders the complete 720p 30fps MP4 falling notes animation with animated hands
+        synchronized with synthesized audio. Streams frames directly into FFmpeg stdin pipe.
         """
         output_mp4_path.parent.mkdir(parents=True, exist_ok=True)
         notes = MidiGenerator.read_midi_notes(midi_path)
         
-        # Determine total duration from audio or notes
         import soundfile as sf
         audio_duration = 0.0
         try:
@@ -165,10 +173,11 @@ class VideoRenderer:
         t_err = threading.Thread(target=drain_stderr, daemon=True)
         t_err.start()
 
+        dt = 1.0 / float(self.fps)
         try:
             for frame_idx in range(total_frames):
-                current_time = frame_idx / float(self.fps)
-                frame = self._render_single_frame(notes, current_time)
+                current_time = frame_idx * dt
+                frame = self._render_single_frame(notes, current_time, dt)
                 
                 # Write raw bytes to ffmpeg stdin
                 proc.stdin.write(frame.tobytes())
@@ -179,7 +188,7 @@ class VideoRenderer:
                     progress_callback(pct, f"Rendered frame {frame_idx + 1}/{total_frames} ({pct * 100:.1f}%)")
 
             proc.stdin.close()
-            proc.wait(timeout=60)
+            proc.wait(timeout=120)
             t_err.join(timeout=5)
 
             if proc.returncode != 0:
@@ -197,54 +206,59 @@ class VideoRenderer:
         logger.info(f"Successfully generated final MP4: {output_mp4_path} ({output_mp4_path.stat().st_size} bytes)")
         return output_mp4_path
 
-    def _render_single_frame(self, notes: List[Dict[str, Any]], current_time: float) -> np.ndarray:
+    def _render_single_frame(self, notes: List[Dict[str, Any]], current_time: float, dt: float = 0.033) -> np.ndarray:
         """
-        Renders a single frame at current_time.
-        Dark gradient background, falling colored bars, strike line, glowing 88 keys.
+        Renders a single frame at current_time with Falling Note aesthetic:
+        - Deep gradient background
+        - Rounded falling note bars with musical pitch badges
+        - Glowing 88-key piano keyboard with octave indicators
+        - Animated anime hands with soft drop shadows and finger kinematics
+        - Elegant 'Ped.' indicator and neon strike bloom
         """
-        # Create dark background: top #07090E, bottom #0F1420
+        # 1. Dark Gradient Background (#06080D to #0B101B)
         frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-        # Fast vertical gradient
         for y in range(self.keyboard_top):
             factor = y / float(self.keyboard_top)
-            b = int(14 + factor * 14)
-            g = int(9 + factor * 11)
-            r = int(7 + factor * 9)
+            b = int(13 + factor * 12)
+            g = int(8 + factor * 8)
+            r = int(6 + factor * 6)
             frame[y, :] = (b, g, r)
 
-        # Strike line (Y = self.strike_y) with subtle glow
-        cv2.line(frame, (0, self.strike_y), (self.width, self.strike_y), (80, 70, 60), 1)
-        cv2.line(frame, (0, self.strike_y - 1), (self.width, self.strike_y - 1), (40, 35, 30), 1)
+        # Subtle vertical key guideline dividers in the falling note area
+        for key in self.white_keys:
+            x = key["x_left"]
+            cv2.line(frame, (x, 0), (x, self.strike_y), (18, 16, 20), 1)
 
-        # Find active notes and notes in lookahead window
-        # Notes in window: end_time >= current_time and start_time <= current_time + lookahead
+        # 2. Identify active notes & visible notes in lookahead window
         t_max = current_time + self.lookahead
-        active_midi = {}  # midi -> note info for key illumination
+        active_notes = []
+        active_midi = {}
 
-        # Draw falling notes
         for note in notes:
             start_t = note["start_time"]
             end_t = note["end_time"]
-
-            # Check if active currently (hitting piano)
             if start_t <= current_time <= end_t:
+                active_notes.append(note)
                 active_midi[note["pitch"]] = note
 
-            # Check if visible on screen
-            if end_t < current_time or start_t > t_max:
-                continue
+        # 3. Draw Falling Note Bars with Rounded Ends & Note Badges
+        visible_notes = [n for n in notes if not (n["end_time"] < current_time or n["start_time"] > t_max)]
+        
+        # Sort so longer / background notes render behind shorter notes
+        visible_notes.sort(key=lambda n: n["start_time"])
 
+        for note in visible_notes:
+            start_t = note["start_time"]
+            end_t = note["end_time"]
             geom = self.key_geometry.get(note["pitch"])
             if not geom:
                 continue
 
             # Calculate Y coordinates
-            # When current_time == start_t, bottom is at strike_y
-            # When current_time < start_t, bottom is above strike_y
             y_bottom = self.strike_y - int(((start_t - current_time) / self.lookahead) * self.strike_y)
             y_top = self.strike_y - int(((end_t - current_time) / self.lookahead) * self.strike_y)
 
-            # Clamp coordinates to screen
+            # Clamp coordinates
             y_bottom = min(self.strike_y, y_bottom)
             y_top = max(0, y_top)
 
@@ -252,58 +266,87 @@ class VideoRenderer:
                 continue
 
             # Note width & position
-            x_left = geom["x_left"] + 1
-            x_right = geom["x_right"] - 1
+            x_left = geom["x_left"] + 2
+            x_right = geom["x_right"] - 2
             if x_right <= x_left:
-                x_right = x_left + 1
+                x_right = x_left + 2
+            note_w = x_right - x_left
+            radius = min(note_w // 2, 7)
 
-            # Color scheme:
-            # Right Hand (Treble): Electric Blue / Cyan gradient (BGR)
-            # Left Hand (Bass): Violet / Magenta / Purple gradient (BGR)
+            # Color scheme matching Falling Note:
+            # Right Hand: Cyan / Electric Blue (#38bdf8 / #3b82f6)
+            # Left Hand: Emerald / Green (#10b981 / #059669)
             is_right = (note.get("hand") == "right")
             if is_right:
-                # Electric Blue / Cyan: (B=240, G=170, R=50) to (B=255, G=120, R=40)
-                pitch_factor = np.clip((note["pitch"] - 60) / 48.0, 0.0, 1.0)
-                base_color = (
-                    int(255 - pitch_factor * 30),
-                    int(180 - pitch_factor * 60),
-                    int(40 + pitch_factor * 80)
-                )
-                border_color = (255, 220, 120)
+                # Electric Blue / Sky Blue
+                base_color = (248, 189, 56)      # BGR: #38bdf8
+                glow_border = (255, 230, 160)
+                badge_bg = (220, 120, 30)
             else:
-                # Violet / Magenta: (B=230, G=70, R=180) to (B=200, G=40, R=140)
-                pitch_factor = np.clip((note["pitch"] - 21) / 40.0, 0.0, 1.0)
-                base_color = (
-                    int(230 - pitch_factor * 40),
-                    int(70 + pitch_factor * 30),
-                    int(170 + pitch_factor * 60)
-                )
-                border_color = (240, 160, 240)
+                # Emerald / Jade Green (like the screenshot!)
+                base_color = (129, 185, 16)      # BGR: #10b981
+                glow_border = (180, 240, 100)
+                badge_bg = (100, 150, 10)
 
-            # Draw note rectangle with border
-            cv2.rectangle(frame, (x_left, y_top), (x_right, y_bottom), base_color, -1)
-            cv2.rectangle(frame, (x_left, y_top), (x_right, y_bottom), border_color, 1)
+            # Draw note body
+            cv2.rectangle(frame, (x_left, y_top + radius), (x_right, y_bottom - radius), base_color, -1)
+            # Rounded top cap
+            cv2.circle(frame, (x_left + radius, y_top + radius), radius, base_color, -1)
+            cv2.circle(frame, (x_right - radius, y_top + radius), radius, base_color, -1)
+            cv2.rectangle(frame, (x_left + radius, y_top), (x_right - radius, y_top + radius * 2), base_color, -1)
+            # Rounded bottom cap
+            cv2.circle(frame, (x_left + radius, y_bottom - radius), radius, base_color, -1)
+            cv2.circle(frame, (x_right - radius, y_bottom - radius), radius, base_color, -1)
+            cv2.rectangle(frame, (x_left + radius, y_bottom - radius * 2), (x_right - radius, y_bottom), base_color, -1)
 
-            # If note is actively playing, draw intense strike spark / glow
+            # Subtle glow border
+            cv2.rectangle(frame, (x_left, y_top + radius), (x_right, y_bottom - radius), glow_border, 1)
+
+            # Draw note pitch badge (e.g. 'C#', 'G#') if bar is tall enough
+            note_h = y_bottom - y_top
+            if note_h >= 24:
+                note_name = HandAnimator.get_note_name(note["pitch"])
+                badge_cx = int((x_left + x_right) / 2)
+                badge_cy = int(y_bottom - 11)
+                badge_r = min(radius + 2, 8)
+
+                # Badge background pill
+                cv2.circle(frame, (badge_cx, badge_cy), badge_r, (15, 15, 20), -1)
+                cv2.circle(frame, (badge_cx, badge_cy), badge_r, glow_border, 1, cv2.LINE_AA)
+                
+                # Badge text
+                text_scale = 0.32 if len(note_name) > 1 else 0.36
+                text_size = cv2.getTextSize(note_name, cv2.FONT_HERSHEY_SIMPLEX, text_scale, 1)[0]
+                tx = badge_cx - text_size[0] // 2
+                ty = badge_cy + text_size[1] // 2
+                cv2.putText(frame, note_name, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, text_scale, (255, 255, 255), 1, cv2.LINE_AA)
+
+            # Spark glow when hitting strike line
             if start_t <= current_time <= end_t:
-                spark_h = min(12, y_bottom - y_top)
                 spark_color = (255, 255, 255)
-                cv2.rectangle(frame, (x_left - 1, y_bottom - spark_h), (x_right + 1, y_bottom + 2), spark_color, -1)
+                cv2.rectangle(frame, (x_left - 1, self.strike_y - 6), (x_right + 1, self.strike_y + 2), spark_color, -1)
 
-        # Draw Piano Keyboard
+        # 4. Draw 88-Key Piano Keyboard with Octave Labels
         self._render_keyboard(frame, active_midi)
+
+        # 5. Animate & Draw Anime Hands with Soft Drop Shadows
+        self.hand_animator.update_positions(active_notes, self.key_geometry, dt)
+        self.hand_animator.draw_hands(frame)
+
+        # 6. Draw Pedal Indicator & Neon Strike Line
+        self.hand_animator.draw_pedal_and_decorations(frame, has_pedal=True)
 
         return frame
 
     def _render_keyboard(self, frame: np.ndarray, active_midi: Dict[int, Any]):
         """
-        Renders the 88-key piano keyboard with realistic white/black keys
-        and responsive illumination on active notes.
+        Renders the 88-key piano keyboard with realistic white/black keys,
+        active key illumination, and octave subtitle markers (C1, C2, etc.).
         """
-        # Keyboard background plate
-        cv2.rectangle(frame, (0, self.keyboard_top), (self.width, self.keyboard_bottom), (15, 15, 18), -1)
+        # Keyboard chassis
+        cv2.rectangle(frame, (0, self.keyboard_top), (self.width, self.keyboard_bottom), (12, 12, 16), -1)
 
-        # 1. Draw White Keys
+        # 1. White Keys
         for key in self.white_keys:
             midi = key["midi"]
             is_active = (midi in active_midi)
@@ -313,24 +356,29 @@ class VideoRenderer:
             if is_active:
                 note = active_midi[midi]
                 is_right = (note.get("hand") == "right")
-                # Glowing active white key
-                if is_right:
-                    key_color = (245, 210, 100)  # Bright Cyan/Electric Blue highlight
-                else:
-                    key_color = (220, 130, 210)  # Bright Violet highlight
+                # Active highlight glow
+                key_color = (250, 220, 130) if is_right else (180, 235, 140)
                 border_color = (255, 255, 255)
             else:
-                key_color = (240, 240, 242)      # Off-white ivory
-                border_color = (130, 130, 135)   # Subtle key divider
+                key_color = (242, 242, 245)      # Clean ivory
+                border_color = (130, 130, 138)   # Key divider
 
-            # Fill white key body
             cv2.rectangle(frame, (x1, y1), (x2, y2), key_color, -1)
-            # Key separator border
             cv2.rectangle(frame, (x1, y1), (x2, y2), border_color, 1)
             # Bottom beveled edge
-            cv2.rectangle(frame, (x1, y2 - 6), (x2, y2), (180, 180, 185) if not is_active else key_color, -1)
+            bevel_color = key_color if is_active else (190, 190, 195)
+            cv2.rectangle(frame, (x1, y2 - 6), (x2, y2), bevel_color, -1)
 
-        # 2. Draw Black Keys (overlay on top of white keys)
+            # Octave marker (C1, C2, ..., C8)
+            octave_label = HandAnimator.is_c_key(midi)
+            if octave_label:
+                # Draw subtle gray octave text near bottom of key
+                text_size = cv2.getTextSize(octave_label, cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)[0]
+                tx = int((x1 + x2) / 2 - text_size[0] / 2)
+                ty = y2 - 14
+                cv2.putText(frame, octave_label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (140, 140, 150), 1, cv2.LINE_AA)
+
+        # 2. Black Keys (overlay on top of white keys)
         for key in self.black_keys:
             midi = key["midi"]
             is_active = (midi in active_midi)
@@ -340,20 +388,17 @@ class VideoRenderer:
             if is_active:
                 note = active_midi[midi]
                 is_right = (note.get("hand") == "right")
-                if is_right:
-                    b_color = (230, 160, 40)   # Vivid Electric Cyan
-                else:
-                    b_color = (200, 70, 180)   # Vivid Magenta
+                b_color = (240, 180, 50) if is_right else (120, 210, 80)
                 border_color = (255, 255, 255)
             else:
-                b_color = (25, 25, 30)         # Ebony black
-                border_color = (50, 50, 55)
+                b_color = (22, 22, 26)           # Deep ebony
+                border_color = (48, 48, 54)
 
             # Drop shadow under black key
-            cv2.rectangle(frame, (x1 - 1, y1), (x2 + 2, y2 + 3), (10, 10, 12), -1)
+            cv2.rectangle(frame, (x1 - 1, y1), (x2 + 2, y2 + 4), (10, 10, 12), -1)
             # Black key body
             cv2.rectangle(frame, (x1, y1), (x2, y2), b_color, -1)
             cv2.rectangle(frame, (x1, y1), (x2, y2), border_color, 1)
-            # Top highlight bevel
+            # Top highlight sheen
             if not is_active:
-                cv2.rectangle(frame, (x1 + 1, y1 + 1), (x2 - 1, y1 + 8), (55, 55, 60), -1)
+                cv2.rectangle(frame, (x1 + 1, y1 + 1), (x2 - 1, y1 + 8), (55, 55, 62), -1)

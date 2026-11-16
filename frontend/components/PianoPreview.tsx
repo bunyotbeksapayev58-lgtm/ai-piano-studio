@@ -38,6 +38,8 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [activeNotesCount, setActiveNotesCount] = useState<number>(0);
   const [viewMode, setViewMode] = useState<"3d" | "video">("3d");
+  const [showHands, setShowHands] = useState<boolean>(true);
+  const showHandsRef = useRef<boolean>(true);
 
   // Keep track of active note indices for Three.js render loop
   const timeRef = useRef<number>(0);
@@ -215,6 +217,81 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
       noteMeshes.push({ mesh, note: n });
     });
 
+    // Helper to create stylized 3D anime hand with articulated fingers & soft shadow
+    const create3DHand = (isLeft: boolean) => {
+      const group = new THREE.Group();
+      
+      const skinMat = new THREE.MeshStandardMaterial({
+        color: 0xf7d6c4,
+        roughness: 0.45,
+        metalness: 0.05,
+      });
+      const shadowMat = new THREE.MeshBasicMaterial({
+        color: 0x050508,
+        transparent: true,
+        opacity: 0.42,
+      });
+
+      // Palm body
+      const palmGeom = new THREE.BoxGeometry(2.3, 0.38, 1.9);
+      const palm = new THREE.Mesh(palmGeom, skinMat);
+      palm.position.set(0, 0, 0);
+      group.add(palm);
+
+      // Wrist
+      const wristGeom = new THREE.BoxGeometry(1.7, 0.32, 1.7);
+      const wrist = new THREE.Mesh(wristGeom, skinMat);
+      wrist.position.set(0, 0.04, 1.5);
+      group.add(wrist);
+
+      // 5 Fingers with pivot groups: [Thumb, Index, Middle, Ring, Pinky]
+      const fingerPivots: THREE.Group[] = [];
+      const fingerSpacings = isLeft
+        ? [0.92, 0.44, 0.0, -0.44, -0.82] // Left: Thumb on right (+)
+        : [-0.92, -0.44, 0.0, 0.44, 0.82]; // Right: Thumb on left (-)
+      const fingerLengths = [1.1, 1.6, 1.8, 1.55, 1.25];
+
+      for (let i = 0; i < 5; i++) {
+        const fingerPivot = new THREE.Group();
+        const fX = fingerSpacings[i];
+        const fZ = i === 0 ? 0.3 : -0.95;
+        fingerPivot.position.set(fX, 0, fZ);
+
+        const fLen = fingerLengths[i];
+        const fingerGeom = new THREE.BoxGeometry(0.3, 0.28, fLen);
+        const fingerMesh = new THREE.Mesh(fingerGeom, skinMat);
+        fingerMesh.position.set(0, -0.05, -fLen / 2);
+        fingerPivot.add(fingerMesh);
+
+        if (i === 0) {
+          fingerPivot.rotation.y = isLeft ? 0.45 : -0.45;
+        }
+
+        group.add(fingerPivot);
+        fingerPivots.push(fingerPivot);
+      }
+
+      // Soft drop shadow plane on keys
+      const shadowGeom = new THREE.PlaneGeometry(3.6, 3.2);
+      const shadowMesh = new THREE.Mesh(shadowGeom, shadowMat);
+      shadowMesh.rotation.x = -Math.PI / 2;
+      shadowMesh.position.set(0, -0.52, -0.8);
+      group.add(shadowMesh);
+
+      // Inward hand angle
+      group.rotation.z = isLeft ? -0.15 : 0.15;
+      group.rotation.y = isLeft ? 0.12 : -0.12;
+
+      return { group, fingers: fingerPivots };
+    };
+
+    const leftHand = create3DHand(true);
+    const rightHand = create3DHand(false);
+    leftHand.group.position.set(-6.5, 0.95, 7.8);
+    rightHand.group.position.set(6.5, 0.95, 7.8);
+    scene.add(leftHand.group);
+    scene.add(rightHand.group);
+
     // Animation Loop
     let animId: number;
     const animate = () => {
@@ -223,6 +300,7 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
       const t = timeRef.current;
       let activeCount = 0;
       const activeMidiSet = new Set<number>();
+      const activeNotesList: NoteDto[] = [];
 
       // Update falling notes positions
       noteMeshes.forEach(({ mesh, note }) => {
@@ -236,9 +314,7 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
           const length = (mesh.geometry as THREE.BoxGeometry).parameters.depth;
 
           // When t == startT, front edge is at strikeZ
-          // Distance from strike line:
           const distFromStrike = ((startT - t) / lookahead) * travelDistance;
-          // Center of the note bar:
           const centerZ = strikeZ - distFromStrike - length / 2;
 
           mesh.position.set(x, 0.2, centerZ);
@@ -246,6 +322,7 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
           if (t >= startT && t <= endT) {
             activeCount++;
             activeMidiSet.add(note.pitch);
+            activeNotesList.push(note);
           }
         } else {
           mesh.visible = false;
@@ -260,10 +337,8 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
         const mat = mesh.material as THREE.MeshStandardMaterial;
 
         if (activeMidiSet.has(midi)) {
-          // Depress key slightly and illuminate
           mesh.position.y = origY - 0.12;
           mesh.rotation.x = 0.04;
-          // Emissive glow
           const noteInfo = notesRef.current.find((n) => n.pitch === midi && t >= n.start_time && t <= n.end_time);
           if (noteInfo?.hand === "left") {
             mat.emissive.setHex(0xa855f7);
@@ -272,12 +347,47 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
           }
           mat.emissiveIntensity = 0.9;
         } else {
-          // Reset key
           mesh.position.y = origY;
           mesh.rotation.x = 0;
           mat.emissive.setHex(0x000000);
           mat.emissiveIntensity = 0;
         }
+      }
+
+      // Animate 3D Hands
+      const isHandsVisible = showHandsRef.current;
+      leftHand.group.visible = isHandsVisible;
+      rightHand.group.visible = isHandsVisible;
+
+      if (isHandsVisible) {
+        const lhNotes = activeNotesList.filter((n) => n.hand === "left");
+        const rhNotes = activeNotesList.filter((n) => n.hand === "right");
+
+        let targetLhX = -6.5;
+        if (lhNotes.length > 0) {
+          const avgX = lhNotes.reduce((acc, n) => acc + (keyXCenter.get(n.pitch) || 0), 0) / lhNotes.length;
+          targetLhX = avgX;
+        }
+        let targetRhX = 6.5;
+        if (rhNotes.length > 0) {
+          const avgX = rhNotes.reduce((acc, n) => acc + (keyXCenter.get(n.pitch) || 0), 0) / rhNotes.length;
+          targetRhX = avgX;
+        }
+
+        leftHand.group.position.x += (targetLhX - leftHand.group.position.x) * 0.14;
+        rightHand.group.position.x += (targetRhX - rightHand.group.position.x) * 0.14;
+
+        // Animate left hand fingers
+        leftHand.fingers.forEach((finger, idx) => {
+          const targetRot = lhNotes.length > 0 ? 0.22 : 0.04;
+          finger.rotation.x += (targetRot - finger.rotation.x) * 0.2;
+        });
+
+        // Animate right hand fingers
+        rightHand.fingers.forEach((finger, idx) => {
+          const targetRot = rhNotes.length > 0 ? 0.22 : 0.04;
+          finger.rotation.x += (targetRot - finger.rotation.x) * 0.2;
+        });
       }
 
       setActiveNotesCount(activeCount);
@@ -419,6 +529,24 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
               Rendered 720p MP4
             </button>
           </div>
+
+          {viewMode === "3d" && (
+            <button
+              onClick={() => {
+                const nextVal = !showHands;
+                setShowHands(nextVal);
+                showHandsRef.current = nextVal;
+              }}
+              className={`px-3 py-2 rounded-xl text-xs font-semibold border transition-all ${
+                showHands
+                  ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm shadow-emerald-500/20"
+                  : "bg-dark-800 text-gray-400 border-dark-700 hover:text-white"
+              }`}
+              title="Toggle Animated Playing Hands"
+            >
+              Hands: {showHands ? "ON" : "OFF"}
+            </button>
+          )}
 
           {onOpenMidiEditor && (
             <button
