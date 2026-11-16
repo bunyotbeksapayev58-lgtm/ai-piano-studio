@@ -12,18 +12,86 @@ from app.rendering.hand_animator import HandAnimator
 
 logger = logging.getLogger(__name__)
 
+THEME_PALETTES: Dict[str, Dict[str, Any]] = {
+    "falling_note_anime": {
+        "name": "Falling Note Anime",
+        "right_color": (248, 189, 56),      # BGR: #38bdf8 (Sky Blue)
+        "right_glow": (255, 230, 160),
+        "left_color": (129, 185, 16),       # BGR: #10b981 (Emerald Green)
+        "left_glow": (180, 240, 100),
+        "bg_top": (13, 8, 6),
+        "bg_bottom": (25, 16, 11),
+        "pedal_color": (255, 180, 80)
+    },
+    "cyberpunk_neon": {
+        "name": "Cyberpunk Neon",
+        "right_color": (142, 63, 244),      # BGR: #f43f8e (Neon Pink/Magenta)
+        "right_glow": (200, 140, 255),
+        "left_color": (212, 182, 6),        # BGR: #06b6d4 (Cyber Cyan)
+        "left_glow": (245, 225, 100),
+        "bg_top": (25, 10, 15),
+        "bg_bottom": (40, 15, 25),
+        "pedal_color": (220, 60, 240)
+    },
+    "royal_gold": {
+        "name": "Royal Gold & Ebony",
+        "right_color": (11, 158, 245),      # BGR: #f59e0b (Radiant Amber Gold)
+        "right_glow": (100, 210, 255),
+        "left_color": (36, 191, 251),       # BGR: #fbbf24 (Warm Platinum Gold)
+        "left_glow": (120, 225, 255),
+        "bg_top": (10, 10, 14),
+        "bg_bottom": (18, 16, 24),
+        "pedal_color": (40, 180, 250)
+    },
+    "emerald_nature": {
+        "name": "Emerald Nature",
+        "right_color": (166, 184, 20),      # BGR: #14b8a6 (Teal Mint)
+        "right_glow": (210, 235, 120),
+        "left_color": (94, 197, 34),        # BGR: #22c55e (Forest Green)
+        "left_glow": (150, 245, 110),
+        "bg_top": (10, 18, 10),
+        "bg_bottom": (15, 28, 18),
+        "pedal_color": (120, 240, 140)
+    },
+    "sunset_lofi": {
+        "name": "Sunset Lo-Fi",
+        "right_color": (133, 113, 251),     # BGR: #fb7185 (Peach Coral)
+        "right_glow": (180, 170, 255),
+        "left_color": (252, 132, 192),      # BGR: #c084fc (Lavender Orchid)
+        "left_glow": (255, 180, 230),
+        "bg_top": (20, 12, 22),
+        "bg_bottom": (35, 20, 38),
+        "pedal_color": (180, 120, 240)
+    },
+    "synthesia_pro": {
+        "name": "Synthesia Pro",
+        "right_color": (235, 99, 37),       # BGR: #2563eb (Royal Blue)
+        "right_glow": (255, 180, 120),
+        "left_color": (22, 204, 132),       # BGR: #84cc16 (Lime Green)
+        "left_glow": (80, 240, 180),
+        "bg_top": (8, 8, 8),
+        "bg_bottom": (16, 16, 16),
+        "pedal_color": (100, 200, 255)
+    }
+}
+
 class VideoRenderer:
     def __init__(
         self,
         width: int = 1280,
         height: int = 720,
         fps: int = 30,
-        lookahead_seconds: float = 3.0
+        lookahead_seconds: float = 3.0,
+        theme: str = "falling_note_anime",
+        hands_style: str = "anime"
     ):
         self.width = width
         self.height = height
         self.fps = fps
         self.lookahead = lookahead_seconds
+        self.theme_key = theme if theme in THEME_PALETTES else "falling_note_anime"
+        self.palette = THEME_PALETTES[self.theme_key]
+        self.hands_style = hands_style
         
         # Geometry layout
         self.keyboard_top = 540
@@ -40,7 +108,8 @@ class VideoRenderer:
             width=self.width,
             height=self.height,
             keyboard_top=self.keyboard_top,
-            keyboard_bottom=self.keyboard_bottom
+            keyboard_bottom=self.keyboard_bottom,
+            hands_style=self.hands_style
         )
 
     def _init_keyboard_geometry(self):
@@ -114,52 +183,59 @@ class VideoRenderer:
         progress_callback: Optional[Callable[[float, str], None]] = None
     ) -> Path:
         """
-        Renders the complete 720p 30fps MP4 falling notes animation with animated hands
-        synchronized with synthesized audio. Streams frames directly into FFmpeg stdin pipe.
+        Renders the complete 720p 30fps Falling Note MP4 video using direct rawvideo pipe to FFmpeg.
         """
         output_mp4_path.parent.mkdir(parents=True, exist_ok=True)
         notes = MidiGenerator.read_midi_notes(midi_path)
+        if not notes:
+            logger.warning("MIDI has no notes; rendering empty piano track.")
+
+        # Determine total duration from audio or notes
+        total_duration = 0.0
+        if synth_audio_path.exists():
+            try:
+                import soundfile as sf
+                info = sf.info(str(synth_audio_path))
+                total_duration = info.duration
+            except Exception:
+                pass
         
-        import soundfile as sf
-        audio_duration = 0.0
-        try:
-            ainfo = sf.info(str(synth_audio_path))
-            audio_duration = ainfo.duration
-        except Exception:
-            pass
+        if total_duration <= 0.0 and notes:
+            total_duration = max(n["end_time"] for n in notes) + 2.0
+        if total_duration <= 0.0:
+            total_duration = 5.0
 
-        max_note_end = max((n["end_time"] for n in notes), default=5.0)
-        total_duration = max(audio_duration, max_note_end + 1.5)
-        total_frames = int(np.ceil(total_duration * self.fps))
+        total_frames = int(total_duration * self.fps)
+        logger.info(f"Rendering {total_frames} frames ({total_duration:.2f}s) at {self.fps}fps [{self.theme_key}]...")
 
-        logger.info(f"Rendering {total_frames} frames ({total_duration:.2f}s) at {self.width}x{self.height} @ {self.fps}fps")
-
+        # FFmpeg command for direct stdin rawvideo stream
         ffmpeg_cmd = [
             settings.ffmpeg_bin,
             "-y",
-            "-loglevel", "error",
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
             "-s", f"{self.width}x{self.height}",
             "-pix_fmt", "bgr24",
             "-r", str(self.fps),
-            "-i", "-",
+            "-i", "-",  # Read frames from stdin pipe
             "-i", str(synth_audio_path),
-            "-c:v", settings.RENDER_VIDEO_CODEC,
+            "-c:v", "libx264",
             "-preset", "ultrafast",
-            "-crf", "22",
+            "-crf", "20",
             "-pix_fmt", "yuv420p",
-            "-c:a", settings.RENDER_AUDIO_CODEC,
-            "-b:a", settings.RENDER_AUDIO_BITRATE,
+            "-c:a", "aac",
+            "-b:a", "192k",
             "-shortest",
+            "-movflags", "+faststart",
             str(output_mp4_path)
         ]
 
         proc = subprocess.Popen(
             ffmpeg_cmd,
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=10**7
         )
 
         stderr_lines = []
@@ -208,20 +284,22 @@ class VideoRenderer:
 
     def _render_single_frame(self, notes: List[Dict[str, Any]], current_time: float, dt: float = 0.033) -> np.ndarray:
         """
-        Renders a single frame at current_time with Falling Note aesthetic:
+        Renders a single frame at current_time with chosen theme aesthetic:
         - Deep gradient background
         - Rounded falling note bars with musical pitch badges
         - Glowing 88-key piano keyboard with octave indicators
         - Animated anime hands with soft drop shadows and finger kinematics
         - Elegant 'Ped.' indicator and neon strike bloom
         """
-        # 1. Dark Gradient Background (#06080D to #0B101B)
+        # 1. Dark Gradient Background
         frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        bg_t = self.palette["bg_top"]
+        bg_b = self.palette["bg_bottom"]
         for y in range(self.keyboard_top):
             factor = y / float(self.keyboard_top)
-            b = int(13 + factor * 12)
-            g = int(8 + factor * 8)
-            r = int(6 + factor * 6)
+            b = int(bg_t[0] + factor * (bg_b[0] - bg_t[0]))
+            g = int(bg_t[1] + factor * (bg_b[1] - bg_t[1]))
+            r = int(bg_t[2] + factor * (bg_b[2] - bg_t[2]))
             frame[y, :] = (b, g, r)
 
         # Subtle vertical key guideline dividers in the falling note area
@@ -243,9 +321,12 @@ class VideoRenderer:
 
         # 3. Draw Falling Note Bars with Rounded Ends & Note Badges
         visible_notes = [n for n in notes if not (n["end_time"] < current_time or n["start_time"] > t_max)]
-        
-        # Sort so longer / background notes render behind shorter notes
         visible_notes.sort(key=lambda n: n["start_time"])
+
+        right_col = self.palette["right_color"]
+        right_glow = self.palette["right_glow"]
+        left_col = self.palette["left_color"]
+        left_glow = self.palette["left_glow"]
 
         for note in visible_notes:
             start_t = note["start_time"]
@@ -254,18 +335,15 @@ class VideoRenderer:
             if not geom:
                 continue
 
-            # Calculate Y coordinates
             y_bottom = self.strike_y - int(((start_t - current_time) / self.lookahead) * self.strike_y)
             y_top = self.strike_y - int(((end_t - current_time) / self.lookahead) * self.strike_y)
 
-            # Clamp coordinates
             y_bottom = min(self.strike_y, y_bottom)
             y_top = max(0, y_top)
 
             if y_bottom <= y_top:
                 continue
 
-            # Note width & position
             x_left = geom["x_left"] + 2
             x_right = geom["x_right"] - 2
             if x_right <= x_left:
@@ -273,20 +351,9 @@ class VideoRenderer:
             note_w = x_right - x_left
             radius = min(note_w // 2, 7)
 
-            # Color scheme matching Falling Note:
-            # Right Hand: Cyan / Electric Blue (#38bdf8 / #3b82f6)
-            # Left Hand: Emerald / Green (#10b981 / #059669)
             is_right = (note.get("hand") == "right")
-            if is_right:
-                # Electric Blue / Sky Blue
-                base_color = (248, 189, 56)      # BGR: #38bdf8
-                glow_border = (255, 230, 160)
-                badge_bg = (220, 120, 30)
-            else:
-                # Emerald / Jade Green (like the screenshot!)
-                base_color = (129, 185, 16)      # BGR: #10b981
-                glow_border = (180, 240, 100)
-                badge_bg = (100, 150, 10)
+            base_color = right_col if is_right else left_col
+            glow_border = right_glow if is_right else left_glow
 
             # Draw note body
             cv2.rectangle(frame, (x_left, y_top + radius), (x_right, y_bottom - radius), base_color, -1)
@@ -334,71 +401,68 @@ class VideoRenderer:
         self.hand_animator.draw_hands(frame)
 
         # 6. Draw Pedal Indicator & Neon Strike Line
-        self.hand_animator.draw_pedal_and_decorations(frame, has_pedal=True)
+        self.hand_animator.draw_pedal_and_decorations(
+            frame,
+            has_pedal=True,
+            pedal_color=self.palette.get("pedal_color", (255, 180, 80))
+        )
 
         return frame
 
     def _render_keyboard(self, frame: np.ndarray, active_midi: Dict[int, Any]):
         """
-        Renders the 88-key piano keyboard with realistic white/black keys,
-        active key illumination, and octave subtitle markers (C1, C2, etc.).
+        Renders the 88 piano keys (52 white keys, 36 black keys) with octave labels and active key illumination.
         """
-        # Keyboard chassis
-        cv2.rectangle(frame, (0, self.keyboard_top), (self.width, self.keyboard_bottom), (12, 12, 16), -1)
+        # Keyboard dark frame background
+        cv2.rectangle(frame, (0, self.keyboard_top), (self.width, self.keyboard_bottom), (10, 10, 14), -1)
 
-        # 1. White Keys
+        right_col = self.palette["right_color"]
+        left_col = self.palette["left_color"]
+
+        # Draw White Keys first
         for key in self.white_keys:
             midi = key["midi"]
-            is_active = (midi in active_midi)
-            x1, x2 = key["x_left"], key["x_right"]
-            y1, y2 = key["top"], key["bottom"]
+            is_active = midi in active_midi
+            xl = key["x_left"]
+            xr = key["x_right"]
+            yt = key["top"]
+            yb = key["bottom"]
 
             if is_active:
-                note = active_midi[midi]
-                is_right = (note.get("hand") == "right")
-                # Active highlight glow
-                key_color = (250, 220, 130) if is_right else (180, 235, 140)
-                border_color = (255, 255, 255)
+                note_obj = active_midi[midi]
+                fill_color = right_col if note_obj.get("hand") == "right" else left_col
             else:
-                key_color = (242, 242, 245)      # Clean ivory
-                border_color = (130, 130, 138)   # Key divider
+                fill_color = (242, 242, 244)  # Ivory white
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), key_color, -1)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), border_color, 1)
-            # Bottom beveled edge
-            bevel_color = key_color if is_active else (190, 190, 195)
-            cv2.rectangle(frame, (x1, y2 - 6), (x2, y2), bevel_color, -1)
+            cv2.rectangle(frame, (xl + 1, yt), (xr - 1, yb), fill_color, -1)
+            cv2.line(frame, (xl, yt), (xl, yb), (35, 35, 42), 1)
 
-            # Octave marker (C1, C2, ..., C8)
-            octave_label = HandAnimator.is_c_key(midi)
-            if octave_label:
-                # Draw subtle gray octave text near bottom of key
-                text_size = cv2.getTextSize(octave_label, cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)[0]
-                tx = int((x1 + x2) / 2 - text_size[0] / 2)
-                ty = y2 - 14
-                cv2.putText(frame, octave_label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (140, 140, 150), 1, cv2.LINE_AA)
+            # Draw octave label on C keys (C1, C2, C3, C4, C5, C6, C7, C8)
+            c_label = HandAnimator.is_c_key(midi)
+            if c_label:
+                text_scale = 0.36
+                text_size = cv2.getTextSize(c_label, cv2.FONT_HERSHEY_SIMPLEX, text_scale, 1)[0]
+                label_x = int((xl + xr) / 2) - text_size[0] // 2
+                label_y = yb - 8
+                text_color = (60, 60, 70) if not is_active else (255, 255, 255)
+                cv2.putText(frame, c_label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, text_scale, text_color, 1, cv2.LINE_AA)
 
-        # 2. Black Keys (overlay on top of white keys)
+        # Draw Black Keys over white keys
         for key in self.black_keys:
             midi = key["midi"]
-            is_active = (midi in active_midi)
-            x1, x2 = key["x_left"], key["x_right"]
-            y1, y2 = key["top"], key["bottom"]
+            is_active = midi in active_midi
+            xl = key["x_left"]
+            xr = key["x_right"]
+            yt = key["top"]
+            yb = key["bottom"]
 
             if is_active:
-                note = active_midi[midi]
-                is_right = (note.get("hand") == "right")
-                b_color = (240, 180, 50) if is_right else (120, 210, 80)
-                border_color = (255, 255, 255)
+                note_obj = active_midi[midi]
+                fill_color = right_col if note_obj.get("hand") == "right" else left_col
             else:
-                b_color = (22, 22, 26)           # Deep ebony
-                border_color = (48, 48, 54)
+                fill_color = (18, 18, 22)  # Ebony black
 
-            # Drop shadow under black key
-            cv2.rectangle(frame, (x1 - 1, y1), (x2 + 2, y2 + 4), (10, 10, 12), -1)
-            # Black key body
-            cv2.rectangle(frame, (x1, y1), (x2, y2), b_color, -1)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), border_color, 1)
-            # Top highlight sheen
+            cv2.rectangle(frame, (xl, yt), (xr, yb), fill_color, -1)
+            # Black key bevel highlight
             if not is_active:
-                cv2.rectangle(frame, (x1 + 1, y1 + 1), (x2 - 1, y1 + 8), (55, 55, 62), -1)
+                cv2.rectangle(frame, (xl + 1, yt), (xr - 1, yb - 4), (32, 32, 38), 1)

@@ -3,7 +3,7 @@ import uuid
 import json
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from app.core.config import settings
@@ -18,9 +18,48 @@ from app.services.video_service import VideoService, VideoValidationError
 from app.services.job_queue import JobQueue
 from app.midi.midi_generator import MidiGenerator
 from app.transcription.base import DetectedNote, TranscriptionResult
-from app.piano.synthesizer import PianoSynthesizer
+from app.piano.synthesizer import PianoSynthesizer, PIANO_PRESETS
+from app.rendering.video_renderer import VideoRenderer, THEME_PALETTES
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+@router.get("/presets")
+def get_presets():
+    """
+    Returns available piano instrument sound presets, visual themes, song arrangement modes, and hand styles.
+    """
+    return {
+        "sound_presets": [
+            {"id": k, "name": v["name"], "description": v["description"]}
+            for k, v in PIANO_PRESETS.items()
+        ],
+        "themes": [
+            {"id": k, "name": v["name"]}
+            for k, v in THEME_PALETTES.items()
+        ],
+        "song_modes": [
+            {
+                "id": "universal_song",
+                "name": "Har qanday qo'shiq / Pop Cover (HPSS AI)",
+                "description": "Baraban, bas va ritmlarni ajratib tashlaydi, vokal melodiyasini o'ng qo'lga, garmoniyani chap qo'lga moslashtiradi."
+            },
+            {
+                "id": "solo_piano",
+                "name": "Akustik Solo Pianino",
+                "description": "Klassik va instrumental royal asarlari uchun garmonik de-rezonans bilan yuqori aniqlikdagi rejim."
+            },
+            {
+                "id": "easy_tutorial",
+                "name": "Oson Pianino (Easy Tutorial)",
+                "description": "Boshlang'ich daraja uchun soddalashtirilgan melodiya va bas."
+            }
+        ],
+        "hands_styles": [
+            {"id": "anime", "name": "Anime Realistic Hands (Tabiiy teri & yumshoq soya)"},
+            {"id": "cyber_glow", "name": "Cyber Glow Hands (Futuristik neon)"},
+            {"id": "off", "name": "Qo'llarsiz (Faqat klavishlar)"}
+        ]
+    }
 
 @router.get("/stats", response_model=DashboardStatsResponse)
 def get_dashboard_stats(
@@ -40,7 +79,6 @@ def get_dashboard_stats(
     processing = sum(1 for p in all_projects if p.status not in [ProjectStatus.COMPLETE, ProjectStatus.FAILED, ProjectStatus.UPLOADED])
     failed = sum(1 for p in all_projects if p.status == ProjectStatus.FAILED)
 
-    # Calculate actual disk consumption in outputs and uploads
     total_bytes = 0
     for p in all_projects:
         for path_str in [p.video_path, p.audio_path, p.midi_path, p.synth_audio_path, p.rendered_video_path]:
@@ -66,11 +104,15 @@ def get_dashboard_stats(
 @router.post("/upload", response_model=ProjectResponse)
 async def upload_video(
     file: UploadFile = File(...),
+    song_mode: Optional[str] = Form("universal_song"),
+    sound_preset: Optional[str] = Form("concert_grand"),
+    theme: Optional[str] = Form("falling_note_anime"),
+    hands_style: Optional[str] = Form("anime"),
     db: Session = Depends(get_db),
     user: Optional[User] = Depends(get_current_user_optional)
 ):
     """
-    Upload a music video file. Validates format, media streams, and duration (<= 10 mins).
+    Upload a music file or video. Supports any general song or solo piano piece.
     """
     sanitized_name = VideoService.sanitize_filename(file.filename or "video.mp4")
     file_ext = Path(sanitized_name).suffix.lower()
@@ -107,6 +149,15 @@ async def upload_video(
         target_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Failed to inspect video: {str(e)}")
 
+    initial_settings = {
+        "song_mode": song_mode or "universal_song",
+        "sound_preset": sound_preset or "concert_grand",
+        "theme": theme or "falling_note_anime",
+        "hands_style": hands_style or "anime",
+        "lookahead": 3.0,
+        "volume": 0.9
+    }
+
     project = Project(
         id=project_id,
         user_id=user.id if user else None,
@@ -118,7 +169,8 @@ async def upload_video(
         progress_percent=10.0,
         current_step=1,
         status_message="Video uploaded and validated successfully.",
-        video_path=str(target_path)
+        video_path=str(target_path),
+        visual_settings=initial_settings
     )
     db.add(project)
     db.commit()
@@ -131,9 +183,6 @@ def list_projects(
     db: Session = Depends(get_db),
     user: Optional[User] = Depends(get_current_user_optional)
 ):
-    """
-    Returns list of projects. If user is logged in, returns user's projects + public/demo items.
-    """
     query = db.query(Project)
     if user:
         query = query.filter((Project.user_id == user.id) | (Project.user_id == None))
@@ -145,9 +194,6 @@ def get_project(
     project_id: str,
     db: Session = Depends(get_db)
 ):
-    """
-    Fetches details of a specific project.
-    """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -160,9 +206,6 @@ def update_project(
     db: Session = Depends(get_db),
     user: Optional[User] = Depends(get_current_user_optional)
 ):
-    """
-    Updates project title or visual settings.
-    """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -173,7 +216,7 @@ def update_project(
     if patch.title is not None:
         project.title = patch.title.strip()
     if patch.visual_settings is not None:
-        current_settings = project.visual_settings
+        current_settings = project.visual_settings or {}
         current_settings.update(patch.visual_settings)
         project.visual_settings = current_settings
 
@@ -185,17 +228,26 @@ def update_project(
 def analyze_project(
     project_id: str,
     auto_render: bool = True,
+    song_mode: Optional[str] = None,
+    sound_preset: Optional[str] = None,
+    theme: Optional[str] = None,
+    hands_style: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    """
-    Triggers the AI transcription, MIDI generation, sound synthesis, and video rendering pipeline.
-    """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
     if project.status not in [ProjectStatus.UPLOADED, ProjectStatus.FAILED, ProjectStatus.COMPLETE]:
         raise HTTPException(status_code=409, detail="Project is currently processing.")
+
+    # Update settings if supplied
+    current_settings = project.visual_settings or {}
+    if song_mode: current_settings["song_mode"] = song_mode
+    if sound_preset: current_settings["sound_preset"] = sound_preset
+    if theme: current_settings["theme"] = theme
+    if hands_style: current_settings["hands_style"] = hands_style
+    project.visual_settings = current_settings
 
     project.status = ProjectStatus.INSPECTING_MEDIA
     project.current_step = 2
@@ -228,28 +280,28 @@ def get_preview_data(
         raise HTTPException(status_code=404, detail="Project not found")
 
     if not project.midi_path or not Path(project.midi_path).exists():
-        raise HTTPException(status_code=400, detail="Transcription has not produced MIDI notes yet.")
+        raise HTTPException(status_code=400, detail="MIDI data is not yet generated for this project.")
 
-    raw_notes = MidiGenerator.read_midi_notes(Path(project.midi_path))
+    notes_dict = MidiGenerator.read_midi_notes(Path(project.midi_path))
     notes = [
         NoteDto(
             pitch=n["pitch"],
             start_time=n["start_time"],
             end_time=n["end_time"],
             duration=n["duration"],
-            velocity=n.get("velocity", 80),
-            hand=n.get("hand", "right"),
-            channel=n.get("channel", 0)
+            velocity=n["velocity"],
+            hand=n["hand"],
+            channel=n["channel"]
         )
-        for n in raw_notes
+        for n in notes_dict
     ]
 
-    audio_url = f"/api/projects/{project.id}/audio" if project.synth_audio_path else None
+    audio_url = f"/api/projects/{project.id}/audio" if project.synth_audio_path and Path(project.synth_audio_path).exists() else None
 
     return PreviewDataResponse(
         project_id=project.id,
         duration_seconds=project.duration_seconds,
-        tempo=project.tempo or 120.0,
+        tempo=project.tempo,
         note_count=len(notes),
         notes=notes,
         audio_url=audio_url,
@@ -263,10 +315,6 @@ def update_midi_notes(
     db: Session = Depends(get_db),
     user: Optional[User] = Depends(get_current_user_optional)
 ):
-    """
-    Saves manually edited MIDI notes back into the project MIDI file,
-    re-synthesizes the piano audio, and updates note metrics.
-    """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -274,10 +322,9 @@ def update_midi_notes(
     if user and project.user_id and project.user_id != user.id:
         raise HTTPException(status_code=403, detail="Not authorized to edit this project.")
 
-    midi_path = Path(project.midi_path or (settings.OUTPUT_DIR / f"{project.id}.mid"))
-    synth_path = Path(project.synth_audio_path or (settings.OUTPUT_DIR / f"{project.id}_piano.wav"))
+    midi_path = settings.OUTPUT_DIR / f"{project.id}.mid"
+    synth_path = settings.OUTPUT_DIR / f"{project.id}_piano.wav"
 
-    # Convert NoteDto list to DetectedNote list
     detected_notes = [
         DetectedNote(
             pitch=n.pitch,
@@ -285,15 +332,13 @@ def update_midi_notes(
             end_time=n.end_time,
             duration=n.duration,
             velocity=n.velocity,
-            hand=n.hand,
-            channel=1 if n.hand == "left" else 0
+            hand=n.hand
         )
         for n in req.notes
     ]
 
-    tempo = req.tempo if req.tempo and req.tempo > 0 else (project.tempo or 120.0)
-    max_end = max((n.end_time for n in detected_notes), default=project.duration_seconds)
-    duration = max(project.duration_seconds, max_end)
+    tempo = req.tempo if req.tempo and req.tempo > 0 else project.tempo
+    duration = max(project.duration_seconds, max((n.end_time for n in req.notes), default=5.0))
 
     res = TranscriptionResult(
         notes=detected_notes,
@@ -301,8 +346,17 @@ def update_midi_notes(
         duration=duration
     )
 
+    v_settings = project.visual_settings or {}
+    sound_preset = v_settings.get("sound_preset", "concert_grand")
+    preset_info = PIANO_PRESETS.get(sound_preset, PIANO_PRESETS["concert_grand"])
+
     # 1. Re-write standard Type 1 MIDI file
-    MidiGenerator.create_midi(res, midi_path)
+    MidiGenerator.create_midi(
+        result=res,
+        output_path=midi_path,
+        program=preset_info.get("program", 0),
+        bank=preset_info.get("bank", 0)
+    )
     project.midi_path = str(midi_path)
     project.note_count = len(detected_notes)
     project.tempo = round(tempo, 1)
@@ -310,7 +364,12 @@ def update_midi_notes(
     # 2. Re-synthesize piano audio
     if req.auto_resynthesize:
         synth = PianoSynthesizer()
-        synth.synthesize(midi_path, synth_path, target_duration=duration)
+        synth.synthesize(
+            midi_path=midi_path,
+            output_wav_path=synth_path,
+            preset_key=sound_preset,
+            target_duration=duration
+        )
         project.synth_audio_path = str(synth_path)
 
     project.status_message = f"MIDI notes updated ({len(detected_notes)} notes saved)."

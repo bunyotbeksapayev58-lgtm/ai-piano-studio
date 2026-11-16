@@ -63,6 +63,35 @@ export interface DashboardStatsResponse {
   storage_mb?: number;
 }
 
+export interface SoundPresetOption {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface ThemeOption {
+  id: string;
+  name: string;
+}
+
+export interface SongModeOption {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface HandsStyleOption {
+  id: string;
+  name: string;
+}
+
+export interface PresetsResponse {
+  sound_presets: SoundPresetOption[];
+  themes: ThemeOption[];
+  song_modes: SongModeOption[];
+  hands_styles: HandsStyleOption[];
+}
+
 export interface UserResponse {
   id: string;
   email: string;
@@ -109,11 +138,11 @@ export const authApi = {
     }
   },
 
-  async register(email: string, username: string, password: string): Promise<TokenResponse> {
+  async register(username: string, email: string, password: string): Promise<TokenResponse> {
     const res = await fetch(`${API_BASE}/auth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, username, password }),
+      body: JSON.stringify({ username, email, password }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -173,6 +202,21 @@ export const authApi = {
 };
 
 export const api = {
+  async getPresets(): Promise<PresetsResponse> {
+    const res = await fetch(`${API_BASE}/projects/presets`, {
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      return {
+        sound_presets: [],
+        themes: [],
+        song_modes: [],
+        hands_styles: [],
+      };
+    }
+    return res.json();
+  },
+
   async getStats(): Promise<DashboardStatsResponse> {
     const res = await fetch(`${API_BASE}/projects/stats`, {
       headers: getAuthHeaders(),
@@ -192,10 +236,20 @@ export const api = {
 
   async uploadVideo(
     file: File,
+    options?: {
+      song_mode?: string;
+      sound_preset?: string;
+      theme?: string;
+      hands_style?: string;
+    },
     onProgress?: (percent: number) => void
   ): Promise<ProjectStatusResponse> {
     const formData = new FormData();
     formData.append("file", file);
+    if (options?.song_mode) formData.append("song_mode", options.song_mode);
+    if (options?.sound_preset) formData.append("sound_preset", options.sound_preset);
+    if (options?.theme) formData.append("theme", options.theme);
+    if (options?.hands_style) formData.append("hands_style", options.hands_style);
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -238,8 +292,23 @@ export const api = {
     });
   },
 
-  async startAnalysis(projectId: string, autoRender: boolean = true): Promise<ProjectStatusResponse> {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/analyze?auto_render=${autoRender}`, {
+  async startAnalysis(
+    projectId: string,
+    autoRender: boolean = true,
+    options?: {
+      song_mode?: string;
+      sound_preset?: string;
+      theme?: string;
+      hands_style?: string;
+    }
+  ): Promise<ProjectStatusResponse> {
+    const query = new URLSearchParams({ auto_render: String(autoRender) });
+    if (options?.song_mode) query.append("song_mode", options.song_mode);
+    if (options?.sound_preset) query.append("sound_preset", options.sound_preset);
+    if (options?.theme) query.append("theme", options.theme);
+    if (options?.hands_style) query.append("hands_style", options.hands_style);
+
+    const res = await fetch(`${API_BASE}/projects/${projectId}/analyze?${query.toString()}`, {
       method: "POST",
       headers: getAuthHeaders(),
     });
@@ -351,19 +420,31 @@ export const api = {
     }
   },
 
+  getVideoStreamUrl(projectId: string): string {
+    return `${API_BASE}/projects/${projectId}/video`;
+  },
+
   getVideoUrl(projectId: string): string {
     return `${API_BASE}/projects/${projectId}/video`;
+  },
+
+  getAudioStreamUrl(projectId: string): string {
+    return `${API_BASE}/projects/${projectId}/audio`;
   },
 
   getAudioUrl(projectId: string): string {
     return `${API_BASE}/projects/${projectId}/audio`;
   },
 
-  getMidiDownloadUrl(projectId: string): string {
-    return `${API_BASE}/projects/${projectId}/midi`;
+  getDownloadUrl(projectId: string): string {
+    return `${API_BASE}/projects/${projectId}/download`;
   },
 
   getVideoDownloadUrl(projectId: string): string {
     return `${API_BASE}/projects/${projectId}/download`;
+  },
+
+  getMidiDownloadUrl(projectId: string): string {
+    return `${API_BASE}/projects/${projectId}/midi`;
   },
 };

@@ -5,41 +5,113 @@ import subprocess
 import numpy as np
 import soundfile as sf
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 from app.core.config import settings
-from app.transcription.base import TranscriptionResult
 
 logger = logging.getLogger(__name__)
+
+PIANO_PRESETS: Dict[str, Dict[str, Any]] = {
+    "concert_grand": {
+        "name": "Salamander Concert Grand",
+        "description": "Chuqur va boy akustik konsert royali (Steinway C5)",
+        "soundfont": "SalC5Light2.sf2",
+        "program": 0,
+        "bank": 0,
+        "gain": 1.25
+    },
+    "bright_pop": {
+        "name": "Yamaha C7 Bright Pop Grand",
+        "description": "Zamonaviy estrada, pop va rok uchun jarangdor, o'tkir grand pianino",
+        "soundfont": "GeneralUser.sf2",
+        "program": 1,
+        "bank": 0,
+        "gain": 1.20
+    },
+    "vintage_upright": {
+        "name": "Vintage Honky-Tonk & Upright",
+        "description": "Retro kafe, ragtime va jazz saloon pianinosi",
+        "soundfont": "GeneralUser.sf2",
+        "program": 3,
+        "bank": 0,
+        "gain": 1.15
+    },
+    "rhodes_ep": {
+        "name": "Neo-Soul Rhodes (Tine EP)",
+        "description": "Mayin va iliq elektr pianino (Fender Rhodes)",
+        "soundfont": "GeneralUser.sf2",
+        "program": 4,
+        "bank": 0,
+        "gain": 1.25
+    },
+    "dx7_fm": {
+        "name": "80s FM Electric Piano (DX7)",
+        "description": "80-yillar romantik balladalar va retro pop elektr royali",
+        "soundfont": "GeneralUser.sf2",
+        "program": 5,
+        "bank": 0,
+        "gain": 1.15
+    },
+    "piano_strings": {
+        "name": "Cinematic Piano & Strings",
+        "description": "Pianino va fonda mayin simfonik torli cholg'ular",
+        "soundfont": "GeneralUser.sf2",
+        "program": 0,
+        "bank": 11,
+        "gain": 1.20
+    },
+    "music_box": {
+        "name": "Dreamy Music Box / Celesta",
+        "description": "Sehrli, sokin va ertaknamo jarang",
+        "soundfont": "GeneralUser.sf2",
+        "program": 10,
+        "bank": 0,
+        "gain": 1.30
+    }
+}
 
 class PianoSynthesizer:
     def __init__(self, soundfont_path: Optional[Path] = None):
         self.soundfont_path = soundfont_path or settings.DEFAULT_SOUNDFONT
 
-    def synthesize(self, midi_path: Path, output_wav_path: Path, target_duration: Optional[float] = None) -> Path:
+    def synthesize(
+        self,
+        midi_path: Path,
+        output_wav_path: Path,
+        preset_key: str = "concert_grand",
+        target_duration: Optional[float] = None
+    ) -> Path:
         """
         Synthesizes realistic piano audio from a MIDI file using FluidSynth
-        and the high-quality Salamander Grand Piano SoundFont.
+        with the requested instrument preset (Concert Grand, Bright Pop, Rhodes, etc.).
         """
         output_wav_path.parent.mkdir(parents=True, exist_ok=True)
         fluidsynth_bin = settings.fluidsynth_bin
 
+        preset_info = PIANO_PRESETS.get(preset_key, PIANO_PRESETS["concert_grand"])
+        sf_name = preset_info.get("soundfont", "SalC5Light2.sf2")
+        sf_path = settings.SOUNDFONT_DIR / sf_name
+        if not sf_path.exists():
+            sf_path = settings.DEFAULT_SOUNDFONT
+
+        gain_str = str(preset_info.get("gain", 1.2))
+
         # Attempt FluidSynth synthesis
         success = False
-        if Path(self.soundfont_path).exists():
+        if sf_path.exists():
             cmd = [
                 fluidsynth_bin,
                 "-ni",
                 "-q",
-                "-g", "1.2",
+                "-g", gain_str,
                 "-R", "1",
                 "-C", "0",
                 "-r", "44100",
                 "-F", str(output_wav_path),
-                str(self.soundfont_path),
+                str(sf_path),
                 str(midi_path)
             ]
             try:
-                logger.info(f"Running FluidSynth: {' '.join(cmd)}")
+                logger.info(f"Running FluidSynth with preset '{preset_key}' ({sf_name}): {' '.join(cmd)}")
                 result = subprocess.run(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -70,21 +142,17 @@ class PianoSynthesizer:
         try:
             data, sr = sf.read(str(wav_path))
             if data.ndim == 1:
-                # Convert mono to stereo
                 data = np.column_stack((data, data))
 
-            # Peak normalization to -1.0 dBFS (approx 0.89)
             peak = np.max(np.abs(data))
             if peak > 0:
                 target_peak = 0.89
                 data = data * (target_peak / peak)
 
-            # Ensure target duration if provided
             if target_duration and target_duration > 0:
                 target_samples = int(target_duration * sr)
                 current_samples = len(data)
                 if current_samples < target_samples:
-                    # Pad with silence
                     pad_len = target_samples - current_samples
                     pad = np.zeros((pad_len, 2), dtype=data.dtype)
                     data = np.vstack((data, pad))
@@ -95,68 +163,45 @@ class PianoSynthesizer:
 
     def _synthesize_internal(self, midi_path: Path, output_wav_path: Path, target_duration: Optional[float] = None):
         """
-        High-fidelity physical model / harmonic additive synthesizer for piano.
-        Simulates hammer attack strike, string inharmonicity, and multi-harmonic exponential decay.
+        Internal fallback physical harmonic synthesizer.
         """
         import pretty_midi
         pm = pretty_midi.PrettyMIDI(str(midi_path))
         sr = 44100
-        
-        # Determine total duration
-        total_time = pm.get_end_time() + 1.5
-        if target_duration and target_duration > total_time:
-            total_time = target_duration + 0.5
-        total_time = max(2.0, total_time)
-        
-        total_samples = int(total_time * sr)
+        duration = max(pm.get_end_time(), target_duration or 1.0)
+        total_samples = int(duration * sr)
         audio = np.zeros(total_samples, dtype=np.float32)
-
-        # Piano harmonic weights and decay rates
-        harmonics = [
-            (1.0, 1.0, 1.0),      # fundamental: amp 1.0, decay rate 1.0
-            (2.0, 0.6, 1.4),      # 2nd harmonic
-            (3.0, 0.35, 1.9),     # 3rd harmonic
-            (4.0, 0.2, 2.5),      # 4th harmonic
-            (5.0, 0.1, 3.2),      # 5th harmonic
-            (6.0, 0.05, 4.0)      # 6th harmonic
-        ]
 
         for inst in pm.instruments:
             for note in inst.notes:
-                f0 = 440.0 * (2.0 ** ((note.pitch - 69) / 12.0))
+                freq = 440.0 * (2.0 ** ((note.pitch - 69) / 12.0))
                 start_sample = int(note.start * sr)
-                dur = max(0.1, note.end - note.start)
-                release_tail = 0.6
-                note_len_samples = int((dur + release_tail) * sr)
-                
+                note_duration = max(0.05, note.end - note.start)
+                note_samples = int(note_duration * sr)
                 if start_sample >= total_samples:
                     continue
+                end_sample = min(total_samples, start_sample + note_samples)
+                length = end_sample - start_sample
+                t = np.linspace(0, length / sr, length, endpoint=False)
+                vel_factor = note.velocity / 127.0
 
-                actual_len = min(note_len_samples, total_samples - start_sample)
-                t = np.arange(actual_len) / sr
+                harmonics = [
+                    (1.0, 1.0, 3.2),
+                    (2.0, 0.45, 4.5),
+                    (3.0, 0.25, 5.8),
+                    (4.0, 0.12, 7.0),
+                    (5.0, 0.06, 8.5)
+                ]
+                note_wave = np.zeros(length, dtype=np.float32)
+                for h_mult, h_amp, decay_rate in harmonics:
+                    env = np.exp(-t * decay_rate)
+                    note_wave += (h_amp * np.sin(2.0 * np.pi * freq * h_mult * t) * env).astype(np.float32)
 
-                # Note envelope
-                decay_base = np.exp(-t / (dur * 1.5 + 0.2))
-                # Soft hammer onset (2ms attack)
-                attack = np.clip(t / 0.003, 0.0, 1.0)
-                
-                vel_factor = (note.velocity / 127.0) ** 1.3
-                note_wave = np.zeros(actual_len, dtype=np.float32)
+                attack_len = min(int(0.005 * sr), length)
+                if attack_len > 0:
+                    note_wave[:attack_len] *= np.linspace(0.0, 1.0, attack_len)
 
-                for h_mult, h_amp, h_decay in harmonics:
-                    freq = f0 * h_mult
-                    if freq < sr / 2:
-                        h_env = np.exp(-t * (h_decay * 1.2))
-                        phase = 2.0 * np.pi * freq * t
-                        note_wave += h_amp * h_env * np.sin(phase).astype(np.float32)
+                audio[start_sample:end_sample] += note_wave * vel_factor * 0.25
 
-                # Add subtle strike noise impulse
-                if len(t) > 200:
-                    strike = np.random.normal(0, 0.05, 200) * np.exp(-np.linspace(0, 5, 200))
-                    note_wave[:200] += strike.astype(np.float32)
-
-                audio[start_sample:start_sample + actual_len] += note_wave * attack * decay_base * vel_factor * 0.2
-
-        # Convert to stereo
-        stereo_audio = np.column_stack((audio, audio))
-        sf.write(str(output_wav_path), stereo_audio, sr, subtype='PCM_16')
+        stereo = np.column_stack((audio, audio))
+        sf.write(str(output_wav_path), stereo, sr, subtype='PCM_16')

@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import pretty_midi
 from app.transcription.base import DetectedNote, TranscriptionResult
 
@@ -8,30 +8,39 @@ class MidiGenerator:
     @staticmethod
     def create_midi(
         result: TranscriptionResult,
-        output_path: Path
+        output_path: Path,
+        program: int = 0,
+        bank: int = 0
     ) -> Path:
         """
         Generates a valid standard Type 1 MIDI file with two distinct tracks:
         1. Right Hand (Melody / Treble)
         2. Left Hand (Bass / Accompaniment)
+        Configured with the specified MIDI program and soundfont bank.
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
         pm = pretty_midi.PrettyMIDI(initial_tempo=result.tempo)
 
-        # Track 0: Right Hand (Program 0 = Acoustic Grand Piano)
+        # Track 0: Right Hand
         right_instrument = pretty_midi.Instrument(
-            program=0,
+            program=program,
             is_drum=False,
             name="Right Hand - Melody"
         )
+        if bank > 0:
+            right_instrument.control_changes.append(pretty_midi.ControlChange(number=0, value=bank, time=0.0))
+            right_instrument.control_changes.append(pretty_midi.ControlChange(number=32, value=0, time=0.0))
 
-        # Track 1: Left Hand (Program 0 = Acoustic Grand Piano)
+        # Track 1: Left Hand
         left_instrument = pretty_midi.Instrument(
-            program=0,
+            program=program,
             is_drum=False,
             name="Left Hand - Bass"
         )
+        if bank > 0:
+            left_instrument.control_changes.append(pretty_midi.ControlChange(number=0, value=bank, time=0.0))
+            left_instrument.control_changes.append(pretty_midi.ControlChange(number=32, value=0, time=0.0))
 
         for note in result.notes:
             pm_note = pretty_midi.Note(

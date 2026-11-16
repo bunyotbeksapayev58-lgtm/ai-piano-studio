@@ -11,7 +11,11 @@ import {
   Gauge,
   Film,
   Sparkles,
-  Sliders
+  Sliders,
+  Layers,
+  Music,
+  RefreshCw,
+  Check
 } from "lucide-react";
 import { NoteDto, PreviewDataResponse, api } from "@/services/api";
 
@@ -21,6 +25,15 @@ interface PianoPreviewProps {
   onGoToExport: () => void;
   onOpenMidiEditor?: () => void;
 }
+
+const THEME_3D_COLORS: Record<string, { right: number; rightEmissive: number; left: number; leftEmissive: number; strike: number }> = {
+  falling_note_anime: { right: 0x38bdf8, rightEmissive: 0x0284c7, left: 0x10b981, leftEmissive: 0x059669, strike: 0x38bdf8 },
+  cyberpunk_neon: { right: 0xf43f8e, rightEmissive: 0xbe123c, left: 0x06b6d4, leftEmissive: 0x0891b2, strike: 0xf43f8e },
+  royal_gold: { right: 0xf59e0b, rightEmissive: 0xb45309, left: 0xfbbf24, leftEmissive: 0xd97706, strike: 0xf59e0b },
+  emerald_nature: { right: 0x14b8a6, rightEmissive: 0x0f766e, left: 0x22c55e, leftEmissive: 0x15803d, strike: 0x14b8a6 },
+  sunset_lofi: { right: 0xfb7185, rightEmissive: 0xe11d48, left: 0xc084fc, leftEmissive: 0x9333ea, strike: 0xfb7185 },
+  synthesia_pro: { right: 0x2563eb, rightEmissive: 0x1d4ed8, left: 0x84cc16, leftEmissive: 0x4d7c0f, strike: 0xffffff },
+};
 
 export const PianoPreview: React.FC<PianoPreviewProps> = ({
   projectId,
@@ -41,6 +54,14 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
   const [showHands, setShowHands] = useState<boolean>(true);
   const showHandsRef = useRef<boolean>(true);
 
+  // Studio customization state
+  const initialTheme = previewData.visual_settings?.theme || "falling_note_anime";
+  const initialSound = previewData.visual_settings?.sound_preset || "concert_grand";
+  const [selectedTheme, setSelectedTheme] = useState<string>(initialTheme);
+  const [selectedSound, setSelectedSound] = useState<string>(initialSound);
+  const [isApplying, setIsApplying] = useState<boolean>(false);
+  const [applySuccess, setApplySuccess] = useState<boolean>(false);
+
   // Keep track of active note indices for Three.js render loop
   const timeRef = useRef<number>(0);
   const notesRef = useRef<NoteDto[]>(previewData.notes || []);
@@ -54,6 +75,8 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
     const container = containerRef.current;
     const width = container.clientWidth;
     const height = container.clientHeight || 520;
+
+    const colors = THEME_3D_COLORS[selectedTheme] || THEME_3D_COLORS["falling_note_anime"];
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x07090e);
@@ -80,11 +103,11 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
     dirLight.castShadow = true;
     scene.add(dirLight);
 
-    const bluePoint = new THREE.PointLight(0x3b82f6, 2, 40);
+    const bluePoint = new THREE.PointLight(colors.right, 2, 40);
     bluePoint.position.set(10, 8, 10);
     scene.add(bluePoint);
 
-    const violetPoint = new THREE.PointLight(0x8b5cf6, 2, 40);
+    const violetPoint = new THREE.PointLight(colors.left, 2, 40);
     violetPoint.position.set(-10, 8, 10);
     scene.add(violetPoint);
 
@@ -100,53 +123,62 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
     const blackKeyHeight = 0.8;
 
     const totalWidth = totalWhiteKeys * whiteKeyWidth;
-    const startX = -totalWidth / 2 + whiteKeyWidth / 2;
+    const startX = -totalWidth / 2.0;
 
-    const keyMeshes: Map<number, THREE.Mesh> = new Map();
-    const keyOriginalY: Map<number, number> = new Map();
-    const keyOriginalRotX: Map<number, number> = new Map();
-    const keyIsBlack: Map<number, boolean> = new Map();
-    const keyXCenter: Map<number, number> = new Map();
+    const keyPositions = new Map<number, number>();
+    const keyIsBlack = new Map<number, boolean>();
+    const keyMeshes = new Map<number, THREE.Mesh>();
+    const keyOriginalY = new Map<number, number>();
+    const keyOriginalRotX = new Map<number, number>();
 
+    // White keys
+    let currentWhiteIndex = 0;
+    for (let midi = 21; midi <= 108; midi++) {
+      const isBlack = isBlackTable[midi % 12];
+      keyIsBlack.set(midi, isBlack);
+      if (!isBlack) {
+        const x = startX + (currentWhiteIndex + 0.5) * whiteKeyWidth;
+        keyPositions.set(midi, x);
+        currentWhiteIndex++;
+      }
+    }
+
+    // Black keys positioned between white keys
+    for (let midi = 21; midi <= 108; midi++) {
+      if (keyIsBlack.get(midi)) {
+        const prevX = keyPositions.get(midi - 1);
+        const nextX = keyPositions.get(midi + 1);
+        let x = 0;
+        if (prevX !== undefined && nextX !== undefined) {
+          x = (prevX + nextX) / 2.0;
+        } else if (prevX !== undefined) {
+          x = prevX + whiteKeyWidth / 2.0;
+        } else if (nextX !== undefined) {
+          x = nextX - whiteKeyWidth / 2.0;
+        }
+        keyPositions.set(midi, x);
+      }
+    }
+
+    // Materials
     const whiteMat = new THREE.MeshStandardMaterial({
-      color: 0xeeeeee,
-      roughness: 0.3,
+      color: 0xf3f4f6,
+      roughness: 0.2,
       metalness: 0.1,
     });
     const blackMat = new THREE.MeshStandardMaterial({
-      color: 0x18181c,
-      roughness: 0.2,
-      metalness: 0.2,
+      color: 0x111317,
+      roughness: 0.3,
+      metalness: 0.3,
     });
 
-    let whiteCount = 0;
-    // Precompute positions
+    // Create 88 Key Meshes
     for (let midi = 21; midi <= 108; midi++) {
-      const isBlack = isBlackTable[midi % 12];
-      if (!isBlack) {
-        const x = startX + whiteCount * whiteKeyWidth;
-        keyXCenter.set(midi, x);
-        whiteCount++;
-      }
-    }
-
-    for (let midi = 21; midi <= 108; midi++) {
-      const isBlack = isBlackTable[midi % 12];
-      if (isBlack) {
-        const prevX = keyXCenter.get(midi - 1) || 0;
-        const nextX = keyXCenter.get(midi + 1) || 0;
-        keyXCenter.set(midi, (prevX + nextX) / 2);
-      }
-    }
-
-    // Build 3D Key meshes
-    for (let midi = 21; midi <= 108; midi++) {
-      const isBlack = isBlackTable[midi % 12];
-      const x = keyXCenter.get(midi) || 0;
-      keyIsBlack.set(midi, isBlack);
+      const isBlack = keyIsBlack.get(midi)!;
+      const x = keyPositions.get(midi)!;
 
       if (!isBlack) {
-        const geom = new THREE.BoxGeometry(whiteKeyWidth - 0.04, whiteKeyHeight, whiteKeyDepth);
+        const geom = new THREE.BoxGeometry(whiteKeyWidth * 0.94, whiteKeyHeight, whiteKeyDepth);
         const mesh = new THREE.Mesh(geom, whiteMat.clone());
         mesh.position.set(x, 0, 8);
         mesh.castShadow = true;
@@ -177,24 +209,23 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
 
     // Strike line indicator
     const strikeGeom = new THREE.PlaneGeometry(totalWidth + 0.5, 0.08);
-    const strikeMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.8 });
+    const strikeMat = new THREE.MeshBasicMaterial({ color: colors.strike, transparent: true, opacity: 0.8 });
     const strikeLine = new THREE.Mesh(strikeGeom, strikeMat);
     strikeLine.rotation.x = -Math.PI / 2;
     strikeLine.position.set(0, 0.35, 5.9);
     scene.add(strikeLine);
 
     // Dynamic 3D Falling Notes instanced / dynamic meshes
-    // Create note pool
     const noteMeshes: { mesh: THREE.Mesh; note: NoteDto }[] = [];
     const rightNoteMat = new THREE.MeshStandardMaterial({
-      color: 0x3b82f6,
-      emissive: 0x1d4ed8,
+      color: colors.right,
+      emissive: colors.rightEmissive,
       emissiveIntensity: 0.6,
       roughness: 0.3,
     });
     const leftNoteMat = new THREE.MeshStandardMaterial({
-      color: 0xa855f7,
-      emissive: 0x7e22ce,
+      color: colors.left,
+      emissive: colors.leftEmissive,
       emissiveIntensity: 0.6,
       roughness: 0.3,
     });
@@ -249,146 +280,152 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
       const fingerSpacings = isLeft
         ? [0.92, 0.44, 0.0, -0.44, -0.82] // Left: Thumb on right (+)
         : [-0.92, -0.44, 0.0, 0.44, 0.82]; // Right: Thumb on left (-)
-      const fingerLengths = [1.1, 1.6, 1.8, 1.55, 1.25];
+      const fingerLengths = [1.3, 1.7, 1.9, 1.75, 1.4];
 
       for (let i = 0; i < 5; i++) {
-        const fingerPivot = new THREE.Group();
-        const fX = fingerSpacings[i];
-        const fZ = i === 0 ? 0.3 : -0.95;
-        fingerPivot.position.set(fX, 0, fZ);
+        const pivot = new THREE.Group();
+        pivot.position.set(fingerSpacings[i], 0, -0.9);
 
-        const fLen = fingerLengths[i];
-        const fingerGeom = new THREE.BoxGeometry(0.3, 0.28, fLen);
-        const fingerMesh = new THREE.Mesh(fingerGeom, skinMat);
-        fingerMesh.position.set(0, -0.05, -fLen / 2);
-        fingerPivot.add(fingerMesh);
+        const flen = fingerLengths[i];
+        const fGeom = new THREE.BoxGeometry(0.32, 0.28, flen);
+        const fMesh = new THREE.Mesh(fGeom, skinMat);
+        fMesh.position.set(0, 0, -flen / 2.0);
+        pivot.add(fMesh);
 
-        if (i === 0) {
-          fingerPivot.rotation.y = isLeft ? 0.45 : -0.45;
-        }
-
-        group.add(fingerPivot);
-        fingerPivots.push(fingerPivot);
+        fingerPivots.push(pivot);
+        group.add(pivot);
       }
 
-      // Soft drop shadow plane on keys
+      // Soft drop shadow plane projected beneath the hand on the keys
       const shadowGeom = new THREE.PlaneGeometry(3.6, 3.2);
       const shadowMesh = new THREE.Mesh(shadowGeom, shadowMat);
       shadowMesh.rotation.x = -Math.PI / 2;
-      shadowMesh.position.set(0, -0.52, -0.8);
+      shadowMesh.position.set(0, -0.48, 0.2);
       group.add(shadowMesh);
 
-      // Inward hand angle
-      group.rotation.z = isLeft ? -0.15 : 0.15;
-      group.rotation.y = isLeft ? 0.12 : -0.12;
+      // Tilt slightly inward towards the keyboard center
+      group.rotation.y = isLeft ? 0.16 : -0.16;
+      group.position.set(isLeft ? -6 : 6, 0.9, 9.2);
 
-      return { group, fingers: fingerPivots };
+      return { group, fingerPivots };
     };
 
     const leftHand = create3DHand(true);
     const rightHand = create3DHand(false);
-    leftHand.group.position.set(-6.5, 0.95, 7.8);
-    rightHand.group.position.set(6.5, 0.95, 7.8);
     scene.add(leftHand.group);
     scene.add(rightHand.group);
 
     // Animation Loop
     let animId: number;
+    let targetLeftX = -6;
+    let targetRightX = 6;
+
     const animate = () => {
       animId = requestAnimationFrame(animate);
 
       const t = timeRef.current;
-      let activeCount = 0;
-      const activeMidiSet = new Set<number>();
-      const activeNotesList: NoteDto[] = [];
+      const tMax = t + lookahead;
 
-      // Update falling notes positions
+      // Reset active keys
+      keyMeshes.forEach((mesh, midi) => {
+        const isBlack = keyIsBlack.get(midi)!;
+        const origY = keyOriginalY.get(midi)!;
+        mesh.position.y = origY;
+        mesh.rotation.x = 0;
+        const mat = mesh.material as THREE.MeshStandardMaterial;
+        mat.color.setHex(isBlack ? 0x111317 : 0xf3f4f6);
+        mat.emissive.setHex(0x000000);
+      });
+
+      let activeCount = 0;
+      let leftHandXSum = 0;
+      let leftHandXCount = 0;
+      let rightHandXSum = 0;
+      let rightHandXCount = 0;
+      const leftFingerActive = [false, false, false, false, false];
+      const rightFingerActive = [false, false, false, false, false];
+
+      // Update falling notes and active piano keys
       noteMeshes.forEach(({ mesh, note }) => {
         const startT = note.start_time;
         const endT = note.end_time;
 
-        // Is note currently on screen?
-        if (endT >= t && startT <= t + lookahead) {
-          mesh.visible = true;
-          const x = keyXCenter.get(note.pitch) ?? 0;
-          const length = (mesh.geometry as THREE.BoxGeometry).parameters.depth;
-
-          // When t == startT, front edge is at strikeZ
-          const distFromStrike = ((startT - t) / lookahead) * travelDistance;
-          const centerZ = strikeZ - distFromStrike - length / 2;
-
-          mesh.position.set(x, 0.2, centerZ);
-
-          if (t >= startT && t <= endT) {
-            activeCount++;
-            activeMidiSet.add(note.pitch);
-            activeNotesList.push(note);
-          }
-        } else {
+        if (endT < t || startT > tMax) {
           mesh.visible = false;
+          return;
+        }
+
+        mesh.visible = true;
+
+        // Calculate Z position: from far away (-travelDistance + strikeZ) toward strike line (strikeZ)
+        const noteTravelProgress = (startT - t) / lookahead;
+        const noteZ = strikeZ - noteTravelProgress * travelDistance;
+        const noteLength = Math.max(0.3, (note.duration / lookahead) * travelDistance);
+        const centerZ = noteZ - noteLength / 2.0;
+
+        const posX = keyPositions.get(note.pitch) ?? 0;
+        mesh.position.set(posX, 0.45, centerZ);
+
+        // Active note striking the piano key right now
+        if (startT <= t && t <= endT) {
+          activeCount++;
+          const keyMesh = keyMeshes.get(note.pitch);
+          if (keyMesh) {
+            const isRight = note.hand === "right";
+            const pressColor = isRight ? colors.right : colors.left;
+            const emissiveColor = isRight ? colors.rightEmissive : colors.leftEmissive;
+
+            // Depress key downwards and tilt
+            keyMesh.position.y = (keyOriginalY.get(note.pitch) || 0) - 0.12;
+            keyMesh.rotation.x = 0.035;
+
+            const mat = keyMesh.material as THREE.MeshStandardMaterial;
+            mat.color.setHex(pressColor);
+            mat.emissive.setHex(emissiveColor);
+            mat.emissiveIntensity = 0.8;
+
+            // Track hand target position and finger flex
+            if (isRight) {
+              rightHandXSum += posX;
+              rightHandXCount++;
+              const diff = posX - rightHand.group.position.x;
+              if (diff < -0.6) rightFingerActive[0] = true;
+              else if (diff < -0.2) rightFingerActive[1] = true;
+              else if (diff < 0.2) rightFingerActive[2] = true;
+              else if (diff < 0.6) rightFingerActive[3] = true;
+              else rightFingerActive[4] = true;
+            } else {
+              leftHandXSum += posX;
+              leftHandXCount++;
+              const diff = posX - leftHand.group.position.x;
+              if (diff > 0.6) leftFingerActive[0] = true;
+              else if (diff > 0.2) leftFingerActive[1] = true;
+              else if (diff > -0.2) leftFingerActive[2] = true;
+              else if (diff > -0.6) leftFingerActive[3] = true;
+              else leftFingerActive[4] = true;
+            }
+          }
         }
       });
 
-      // Animate 88 Piano Keys
-      for (let midi = 21; midi <= 108; midi++) {
-        const mesh = keyMeshes.get(midi);
-        if (!mesh) continue;
-        const origY = keyOriginalY.get(midi) || 0;
-        const mat = mesh.material as THREE.MeshStandardMaterial;
+      // Smooth hand tracking across piano keyboard
+      if (leftHandXCount > 0) targetLeftX = leftHandXSum / leftHandXCount;
+      if (rightHandXCount > 0) targetRightX = rightHandXSum / rightHandXCount;
 
-        if (activeMidiSet.has(midi)) {
-          mesh.position.y = origY - 0.12;
-          mesh.rotation.x = 0.04;
-          const noteInfo = notesRef.current.find((n) => n.pitch === midi && t >= n.start_time && t <= n.end_time);
-          if (noteInfo?.hand === "left") {
-            mat.emissive.setHex(0xa855f7);
-          } else {
-            mat.emissive.setHex(0x38bdf8);
-          }
-          mat.emissiveIntensity = 0.9;
-        } else {
-          mesh.position.y = origY;
-          mesh.rotation.x = 0;
-          mat.emissive.setHex(0x000000);
-          mat.emissiveIntensity = 0;
-        }
+      leftHand.group.position.x += (targetLeftX - leftHand.group.position.x) * 0.18;
+      rightHand.group.position.x += (targetRightX - rightHand.group.position.x) * 0.18;
+
+      // Animate articulated finger press rotations
+      for (let i = 0; i < 5; i++) {
+        const targetLeftRot = leftFingerActive[i] ? 0.32 : 0.0;
+        const targetRightRot = rightFingerActive[i] ? 0.32 : 0.0;
+        leftHand.fingerPivots[i].rotation.x += (targetLeftRot - leftHand.fingerPivots[i].rotation.x) * 0.35;
+        rightHand.fingerPivots[i].rotation.x += (targetRightRot - rightHand.fingerPivots[i].rotation.x) * 0.35;
       }
 
-      // Animate 3D Hands
-      const isHandsVisible = showHandsRef.current;
-      leftHand.group.visible = isHandsVisible;
-      rightHand.group.visible = isHandsVisible;
-
-      if (isHandsVisible) {
-        const lhNotes = activeNotesList.filter((n) => n.hand === "left");
-        const rhNotes = activeNotesList.filter((n) => n.hand === "right");
-
-        let targetLhX = -6.5;
-        if (lhNotes.length > 0) {
-          const avgX = lhNotes.reduce((acc, n) => acc + (keyXCenter.get(n.pitch) || 0), 0) / lhNotes.length;
-          targetLhX = avgX;
-        }
-        let targetRhX = 6.5;
-        if (rhNotes.length > 0) {
-          const avgX = rhNotes.reduce((acc, n) => acc + (keyXCenter.get(n.pitch) || 0), 0) / rhNotes.length;
-          targetRhX = avgX;
-        }
-
-        leftHand.group.position.x += (targetLhX - leftHand.group.position.x) * 0.14;
-        rightHand.group.position.x += (targetRhX - rightHand.group.position.x) * 0.14;
-
-        // Animate left hand fingers
-        leftHand.fingers.forEach((finger, idx) => {
-          const targetRot = lhNotes.length > 0 ? 0.22 : 0.04;
-          finger.rotation.x += (targetRot - finger.rotation.x) * 0.2;
-        });
-
-        // Animate right hand fingers
-        rightHand.fingers.forEach((finger, idx) => {
-          const targetRot = rhNotes.length > 0 ? 0.22 : 0.04;
-          finger.rotation.x += (targetRot - finger.rotation.x) * 0.2;
-        });
-      }
+      // Hands visibility toggle
+      leftHand.group.visible = showHandsRef.current;
+      rightHand.group.visible = showHandsRef.current;
 
       setActiveNotesCount(activeCount);
       renderer.render(scene, camera);
@@ -398,11 +435,11 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
 
     const handleResize = () => {
       if (!containerRef.current) return;
-      const newW = containerRef.current.clientWidth;
-      const newH = containerRef.current.clientHeight || 520;
-      camera.aspect = newW / newH;
+      const w = containerRef.current.clientWidth;
+      const h = containerRef.current.clientHeight || 520;
+      camera.aspect = w / h;
       camera.updateProjectionMatrix();
-      renderer.setSize(newW, newH);
+      renderer.setSize(w, h);
     };
 
     window.addEventListener("resize", handleResize);
@@ -411,76 +448,58 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
       cancelAnimationFrame(animId);
       window.removeEventListener("resize", handleResize);
       renderer.dispose();
-      if (container) container.innerHTML = "";
+      if (containerRef.current) {
+        containerRef.current.innerHTML = "";
+      }
     };
-  }, [viewMode, previewData]);
+  }, [viewMode, selectedTheme]);
 
-  // Handle Play/Pause
+  // Audio Play / Pause Handler
   const togglePlay = () => {
     if (!audioRef.current) return;
+
     if (isPlaying) {
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
-      audioRef.current.play().then(() => setIsPlaying(true)).catch((e) => console.error(e));
+      audioRef.current
+        .play()
+        .then(() => setIsPlaying(true))
+        .catch((e) => console.error("Playback failed:", e));
     }
   };
 
-  const handleRestart = () => {
+  const handleSeek = (newTime: number) => {
     if (!audioRef.current) return;
-    audioRef.current.currentTime = 0;
-    setCurrentTime(0);
-    timeRef.current = 0;
-    if (!isPlaying) {
-      audioRef.current.play().then(() => setIsPlaying(true));
-    }
+    audioRef.current.currentTime = newTime;
+    setCurrentTime(newTime);
+    timeRef.current = newTime;
   };
 
-  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const target = parseFloat(e.target.value);
-    setCurrentTime(target);
-    timeRef.current = target;
-    if (audioRef.current) {
-      audioRef.current.currentTime = target;
+  const handleApplyPreset = async () => {
+    setIsApplying(true);
+    setApplySuccess(false);
+    try {
+      await api.patchProject(projectId, {
+        visual_settings: {
+          sound_preset: selectedSound,
+          theme: selectedTheme,
+          hands_style: showHands ? "anime" : "off",
+        },
+      });
+      // Trigger background re-render with new instrument and theme
+      await api.triggerRender(projectId);
+      setApplySuccess(true);
+      setTimeout(() => setApplySuccess(false), 3000);
+    } catch (err: any) {
+      alert("Failed to apply settings: " + (err.message || err));
+    } finally {
+      setIsApplying(false);
     }
-  };
-
-  const handleSpeedChange = (speed: number) => {
-    setPlaybackSpeed(speed);
-    if (audioRef.current) {
-      audioRef.current.playbackRate = speed;
-    }
-  };
-
-  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = parseFloat(e.target.value);
-    setVolume(val);
-    if (audioRef.current) {
-      audioRef.current.volume = val;
-    }
-    if (val === 0) setIsMuted(true);
-    else setIsMuted(false);
-  };
-
-  const toggleMute = () => {
-    if (!audioRef.current) return;
-    if (isMuted) {
-      audioRef.current.volume = volume || 0.8;
-      setIsMuted(false);
-    } else {
-      audioRef.current.volume = 0;
-      setIsMuted(true);
-    }
-  };
-
-  const formatTime = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = Math.floor(secs % 60);
-    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   };
 
   return (
-    <div className="bg-dark-900 border border-dark-700/60 rounded-2xl overflow-hidden shadow-2xl">
+    <div className="bg-dark-900 border border-dark-700/60 rounded-3xl overflow-hidden shadow-2xl">
       {/* Hidden audio element for precise audio/visual synchronization */}
       <audio
         ref={audioRef}
@@ -498,38 +517,76 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
       {/* Header bar */}
       <div className="px-6 py-4 border-b border-dark-700/60 flex flex-wrap items-center justify-between gap-4 bg-dark-850/60">
         <div className="flex items-center space-x-3">
-          <div className="w-8 h-8 rounded-lg bg-electric-500/10 border border-electric-500/20 flex items-center justify-center text-electric-400">
+          <div className="w-9 h-9 rounded-xl bg-electric-500/10 border border-electric-500/20 flex items-center justify-center text-electric-400">
             <Sparkles className="w-4 h-4" />
           </div>
           <div>
-            <h2 className="text-base font-semibold text-white">Interactive Piano Preview</h2>
+            <h2 className="text-base font-bold text-white">Interactive Piano 3D Studio</h2>
             <p className="text-xs text-gray-400 font-mono">
-              {previewData.note_count} Notes Detected • {previewData.tempo.toFixed(0)} BPM • 88-Key Standard Range
+              {previewData.note_count} Notalar • {previewData.tempo.toFixed(0)} BPM • 88-Klavish Standart Royal
             </p>
           </div>
         </div>
 
-        {/* View mode toggle */}
-        <div className="flex items-center space-x-2">
-          <div className="bg-dark-800 p-1 rounded-xl border border-dark-700 flex text-xs font-medium">
-            <button
-              onClick={() => setViewMode("3d")}
-              className={`px-3 py-1.5 rounded-lg transition-all ${
-                viewMode === "3d" ? "bg-electric-600 text-white shadow-md shadow-electric-600/30" : "text-gray-400 hover:text-white"
-              }`}
+        {/* View mode & Studio Customization Controls */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Theme Selector */}
+          <div className="flex items-center space-x-1.5 bg-dark-800 border border-dark-700 rounded-xl px-2.5 py-1.5 text-xs text-gray-300">
+            <Layers className="w-3.5 h-3.5 text-sky-400" />
+            <select
+              value={selectedTheme}
+              onChange={(e) => setSelectedTheme(e.target.value)}
+              className="bg-transparent text-white focus:outline-none text-xs font-semibold cursor-pointer"
             >
-              3D Falling Notes
-            </button>
-            <button
-              onClick={() => setViewMode("video")}
-              className={`px-3 py-1.5 rounded-lg transition-all ${
-                viewMode === "video" ? "bg-electric-600 text-white shadow-md shadow-electric-600/30" : "text-gray-400 hover:text-white"
-              }`}
-            >
-              Rendered 720p MP4
-            </button>
+              <option value="falling_note_anime">Falling Note Anime</option>
+              <option value="cyberpunk_neon">Cyberpunk Neon</option>
+              <option value="royal_gold">Royal Gold</option>
+              <option value="emerald_nature">Emerald Nature</option>
+              <option value="sunset_lofi">Sunset Lo-Fi</option>
+              <option value="synthesia_pro">Synthesia Pro</option>
+            </select>
           </div>
 
+          {/* Sound Preset Selector */}
+          <div className="flex items-center space-x-1.5 bg-dark-800 border border-dark-700 rounded-xl px-2.5 py-1.5 text-xs text-gray-300">
+            <Music className="w-3.5 h-3.5 text-violet-400" />
+            <select
+              value={selectedSound}
+              onChange={(e) => setSelectedSound(e.target.value)}
+              className="bg-transparent text-white focus:outline-none text-xs font-semibold cursor-pointer"
+            >
+              <option value="concert_grand">Concert Grand (Salamander)</option>
+              <option value="bright_pop">Bright Pop Grand (Yamaha C7)</option>
+              <option value="vintage_upright">Vintage Upright (Saloon)</option>
+              <option value="rhodes_ep">Neo-Soul Rhodes (Tine EP)</option>
+              <option value="dx7_fm">80s FM Piano (DX7)</option>
+              <option value="piano_strings">Piano & Strings Ensemble</option>
+              <option value="music_box">Dreamy Music Box</option>
+            </select>
+          </div>
+
+          {/* Apply button */}
+          <button
+            onClick={handleApplyPreset}
+            disabled={isApplying}
+            className={`flex items-center space-x-1 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
+              applySuccess
+                ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
+                : "bg-dark-800 text-gray-300 border-dark-700 hover:text-white hover:border-electric-400"
+            }`}
+            title="Pianino va mavzuni saqlash hamda videoni qayta render qilish"
+          >
+            {isApplying ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-electric-400" />
+            ) : applySuccess ? (
+              <Check className="w-3.5 h-3.5 text-emerald-400" />
+            ) : (
+              <RefreshCw className="w-3.5 h-3.5 text-gray-400" />
+            )}
+            <span>{isApplying ? "Saqlanmoqda..." : applySuccess ? "Tayyor!" : "Qayta Render"}</span>
+          </button>
+
+          {/* Hands Toggle */}
           {viewMode === "3d" && (
             <button
               onClick={() => {
@@ -537,34 +594,42 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
                 setShowHands(nextVal);
                 showHandsRef.current = nextVal;
               }}
-              className={`px-3 py-2 rounded-xl text-xs font-semibold border transition-all ${
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
                 showHands
                   ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-sm shadow-emerald-500/20"
                   : "bg-dark-800 text-gray-400 border-dark-700 hover:text-white"
               }`}
-              title="Toggle Animated Playing Hands"
             >
-              Hands: {showHands ? "ON" : "OFF"}
+              Qo‘llar: {showHands ? "ON" : "OFF"}
             </button>
           )}
 
-          {onOpenMidiEditor && (
+          {/* 3D / Video Mode */}
+          <div className="bg-dark-800 p-1 rounded-xl border border-dark-700 flex text-xs font-medium">
             <button
-              onClick={onOpenMidiEditor}
-              className="flex items-center space-x-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-dark-800 hover:bg-dark-700 text-electric-400 border border-electric-500/30 transition-all"
-              title="Open Piano Roll MIDI Editor"
+              onClick={() => setViewMode("3d")}
+              className={`px-2.5 py-1 rounded-lg transition-all ${
+                viewMode === "3d" ? "bg-electric-600 text-white shadow-md shadow-electric-600/30" : "text-gray-400 hover:text-white"
+              }`}
             >
-              <Sliders className="w-3.5 h-3.5" />
-              <span>Edit MIDI</span>
+              3D Sahna
             </button>
-          )}
+            <button
+              onClick={() => setViewMode("video")}
+              className={`px-2.5 py-1 rounded-lg transition-all ${
+                viewMode === "video" ? "bg-electric-600 text-white shadow-md shadow-electric-600/30" : "text-gray-400 hover:text-white"
+              }`}
+            >
+              720p Video
+            </button>
+          </div>
 
           <button
             onClick={onGoToExport}
-            className="flex items-center space-x-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-electric-500 to-violet-600 text-white shadow-md shadow-electric-600/20 hover:scale-105 transition-all"
+            className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-gradient-to-r from-electric-500 to-violet-600 text-white shadow-md shadow-electric-600/20 hover:scale-105 transition-all"
           >
             <Film className="w-3.5 h-3.5" />
-            <span>Go to Export</span>
+            <span>Export MP4</span>
           </button>
         </div>
       </div>
@@ -579,10 +644,10 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
             <div className="absolute top-4 left-4 pointer-events-none flex flex-col space-y-1.5">
               <div className="px-3 py-1 rounded-full text-[11px] font-mono bg-dark-900/80 backdrop-blur-md border border-dark-700/80 text-gray-300 flex items-center space-x-2">
                 <span className="w-2 h-2 rounded-full bg-electric-cyan animate-pulse" />
-                <span>Simultaneous Notes: {activeNotesCount}</span>
+                <span>Bir vaqtdagi notalar: {activeNotesCount}</span>
               </div>
               <div className="px-3 py-1 rounded-full text-[11px] font-mono bg-dark-900/80 backdrop-blur-md border border-dark-700/80 text-gray-400">
-                <span className="text-electric-400">■ Blue: Right Hand (Melody)</span> &bull; <span className="text-violet-400">■ Violet: Left Hand (Bass)</span>
+                <span>O‘ng Qo‘l (Melodiya) &bull; Chap Qo‘l (Bas va Akkordlar)</span>
               </div>
             </div>
           </>
@@ -591,73 +656,84 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
             <video
               src={api.getVideoUrl(projectId)}
               controls
-              className="w-full h-full max-h-[500px] object-contain rounded-xl border border-dark-700 shadow-2xl"
+              className="w-full h-full max-h-[500px] object-contain rounded-2xl border border-dark-700 shadow-2xl"
             />
           </div>
         )}
       </div>
 
       {/* Playback Controls Bar */}
-      <div className="p-4 sm:p-6 bg-dark-850/80 border-t border-dark-700/60 space-y-4">
-        {/* Scrubber slider */}
-        <div className="space-y-1.5">
-          <div className="flex justify-between text-xs font-mono text-gray-400">
-            <span>{formatTime(currentTime)}</span>
-            <span>{formatTime(totalDuration)}</span>
+      <div className="px-6 py-4 border-t border-dark-700/60 bg-dark-850/80 flex flex-wrap items-center justify-between gap-4">
+        {/* Play / Pause & Rewind */}
+        <div className="flex items-center space-x-3">
+          <button
+            onClick={togglePlay}
+            className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-electric-500 to-violet-600 flex items-center justify-center text-white shadow-lg shadow-electric-500/25 hover:scale-105 active:scale-95 transition-all"
+          >
+            {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
+          </button>
+
+          <button
+            onClick={() => handleSeek(0)}
+            className="w-9 h-9 rounded-xl bg-dark-800 hover:bg-dark-750 border border-dark-700 flex items-center justify-center text-gray-300 hover:text-white transition-colors"
+            title="Boshiga qaytarish"
+          >
+            <RotateCcw className="w-4 h-4" />
+          </button>
+
+          <div className="text-xs font-mono text-gray-300">
+            <span>{Math.floor(currentTime / 60)}:{Math.floor(currentTime % 60).toString().padStart(2, "0")}</span>
+            <span className="text-gray-500 mx-1">/</span>
+            <span className="text-gray-500">{Math.floor(totalDuration / 60)}:{Math.floor(totalDuration % 60).toString().padStart(2, "0")}</span>
           </div>
+        </div>
+
+        {/* Timeline Slider */}
+        <div className="flex-1 min-w-[200px] max-w-xl mx-2">
           <input
             type="range"
             min={0}
             max={totalDuration}
             step={0.05}
             value={currentTime}
-            onChange={handleSeek}
-            className="w-full h-1.5 bg-dark-700 rounded-lg appearance-none cursor-pointer accent-electric-500 hover:accent-electric-400"
+            onChange={(e) => handleSeek(parseFloat(e.target.value))}
+            className="w-full h-2 bg-dark-750 rounded-lg appearance-none cursor-pointer accent-electric-400 focus:outline-none"
           />
         </div>
 
-        {/* Buttons and volume */}
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center space-x-3">
-            <button
-              onClick={handleRestart}
-              className="p-2.5 rounded-xl bg-dark-800 text-gray-300 hover:text-white hover:bg-dark-700 transition-colors border border-dark-700/80"
-              title="Restart"
+        {/* Speed & Volume */}
+        <div className="flex items-center space-x-4">
+          {/* Speed */}
+          <div className="flex items-center space-x-1.5 text-xs font-mono bg-dark-800 px-2.5 py-1.5 rounded-xl border border-dark-700">
+            <Gauge className="w-3.5 h-3.5 text-gray-400" />
+            <select
+              value={playbackSpeed}
+              onChange={(e) => {
+                const spd = parseFloat(e.target.value);
+                setPlaybackSpeed(spd);
+                if (audioRef.current) audioRef.current.playbackRate = spd;
+              }}
+              className="bg-transparent text-gray-200 focus:outline-none cursor-pointer"
             >
-              <RotateCcw className="w-4 h-4" />
-            </button>
-
-            <button
-              onClick={togglePlay}
-              className="p-3.5 rounded-xl bg-gradient-to-r from-electric-600 to-violet-600 text-white shadow-lg shadow-electric-600/30 hover:scale-105 active:scale-95 transition-all"
-              title={isPlaying ? "Pause" : "Play"}
-            >
-              {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
-            </button>
-
-            {/* Speed pills */}
-            <div className="flex items-center space-x-1 bg-dark-800/80 p-1 rounded-xl border border-dark-700/80">
-              <Gauge className="w-3.5 h-3.5 text-gray-400 ml-1.5 mr-1" />
-              {[0.5, 0.75, 1.0, 1.25, 1.5].map((s) => (
-                <button
-                  key={s}
-                  onClick={() => handleSpeedChange(s)}
-                  className={`px-2 py-1 text-xs rounded-lg font-mono transition-all ${
-                    playbackSpeed === s
-                      ? "bg-electric-500/20 text-electric-400 font-semibold"
-                      : "text-gray-400 hover:text-gray-200"
-                  }`}
-                >
-                  {s}x
-                </button>
-              ))}
-            </div>
+              <option value="0.5">0.5x</option>
+              <option value="0.75">0.75x</option>
+              <option value="1.0">1.0x</option>
+              <option value="1.25">1.25x</option>
+              <option value="1.5">1.5x</option>
+            </select>
           </div>
 
-          {/* Volume control */}
-          <div className="flex items-center space-x-3">
-            <button onClick={toggleMute} className="text-gray-400 hover:text-white">
-              {isMuted || volume === 0 ? <VolumeX className="w-4 h-4 text-red-400" /> : <Volume2 className="w-4 h-4" />}
+          {/* Volume */}
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => {
+                const nextMuted = !isMuted;
+                setIsMuted(nextMuted);
+                if (audioRef.current) audioRef.current.muted = nextMuted;
+              }}
+              className="text-gray-400 hover:text-white"
+            >
+              {isMuted ? <VolumeX className="w-4 h-4 text-red-400" /> : <Volume2 className="w-4 h-4" />}
             </button>
             <input
               type="range"
@@ -665,8 +741,16 @@ export const PianoPreview: React.FC<PianoPreviewProps> = ({
               max={1}
               step={0.05}
               value={isMuted ? 0 : volume}
-              onChange={handleVolumeChange}
-              className="w-24 h-1.5 bg-dark-700 rounded-lg appearance-none cursor-pointer accent-electric-500"
+              onChange={(e) => {
+                const vol = parseFloat(e.target.value);
+                setVolume(vol);
+                setIsMuted(false);
+                if (audioRef.current) {
+                  audioRef.current.volume = vol;
+                  audioRef.current.muted = false;
+                }
+              }}
+              className="w-16 h-1.5 bg-dark-750 rounded-lg appearance-none cursor-pointer accent-electric-400"
             />
           </div>
         </div>
