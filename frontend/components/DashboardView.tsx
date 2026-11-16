@@ -38,14 +38,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const loadData = async () => {
     try {
-      const [statsData, projectsData] = await Promise.all([
-        api.getStats(),
-        api.getProjects(),
+      // Use Promise.race with a 7-second timeout to prevent infinite hanging
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Request timed out")), 7000)
+      );
+
+      const [statsData, projectsData] = await Promise.race([
+        Promise.all([api.getStats(), api.getProjects()]),
+        timeoutPromise,
       ]);
       setStats(statsData);
-      setProjects(projectsData);
+      setProjects(projectsData || []);
     } catch (err) {
-      console.error("Failed to load dashboard data:", err);
+      console.warn("Failed or timed out loading dashboard data:", err);
+      // Fallback: try fetching projects individually if stats failed
+      try {
+        const pData = await api.getProjects();
+        setProjects(pData || []);
+      } catch (_) {}
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
@@ -54,6 +64,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   useEffect(() => {
     loadData();
+    // Auto-refresh periodically if on dashboard
+    const timer = setInterval(() => {
+      api.getProjects().then((data) => {
+        if (Array.isArray(data)) setProjects(data);
+      }).catch(() => {});
+    }, 10000);
+    return () => clearInterval(timer);
   }, []);
 
   const handleRefresh = () => {

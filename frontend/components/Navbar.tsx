@@ -33,12 +33,26 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [engineStatus, setEngineStatus] = useState<"checking" | "online" | "offline">("checking");
 
   useEffect(() => {
-    api.getProjects()
-      .then((data) => {
-        if (Array.isArray(data)) setEngineStatus("online");
-        else setEngineStatus("offline");
-      })
-      .catch(() => setEngineStatus("offline"));
+    let isMounted = true;
+    const checkStatus = () => {
+      api.getProjects()
+        .then((data) => {
+          if (!isMounted) return;
+          if (Array.isArray(data)) setEngineStatus("online");
+          else setEngineStatus("offline");
+        })
+        .catch(() => {
+          if (!isMounted) return;
+          setEngineStatus("offline");
+        });
+    };
+
+    checkStatus();
+    const timer = setInterval(checkStatus, 5000);
+    return () => {
+      isMounted = false;
+      clearInterval(timer);
+    };
   }, []);
 
   return (

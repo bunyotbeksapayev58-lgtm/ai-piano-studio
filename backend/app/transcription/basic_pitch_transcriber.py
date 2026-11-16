@@ -28,13 +28,12 @@ class BasicPitchTranscriber(BaseTranscriber):
 
     def transcribe(self, audio_path: str, song_mode: str = "universal_song") -> TranscriptionResult:
         """
-        Transcribes any audio or music song using Spotify's Basic Pitch neural network
-        combined with AI Song Arranger (HPSS percussion stripper + key scale detection)
-        and specialized acoustic harmonic overtone filtering.
+        Transcribes audio with high-precision onset thresholds,
+        acoustic harmonic overtone suppression (+12, +19, +24 semitones),
+        and clean split-note de-stuttering.
         """
-        logger.info(f"Starting Universal Song Piano transcription for: {audio_path} [Mode: {song_mode}]")
+        logger.info(f"Starting High-Precision Piano transcription for: {audio_path} [Mode: {song_mode}]")
         from basic_pitch.inference import predict
-        from basic_pitch import ICASSP_2022_MODEL_PATH
 
         # Get audio duration
         try:
@@ -44,9 +43,8 @@ class BasicPitchTranscriber(BaseTranscriber):
             duration = 0.0
 
         inference_audio_path = audio_path
-        key_info: Optional[Dict[str, Any]] = None
 
-        # If universal_song mode: apply HPSS to remove drums, 808s, and percussive transients
+        # If universal_song mode: apply transient-preserving pre-processing
         if song_mode in ["universal_song", "easy_tutorial"]:
             harmonic_path = str(Path(audio_path).parent / f"hpss_harmonic_{Path(audio_path).stem}.wav")
             try:
@@ -55,21 +53,15 @@ class BasicPitchTranscriber(BaseTranscriber):
                     output_harmonic_wav_path=harmonic_path
                 )
                 inference_audio_path = prep["cleaned_wav"]
-                key_info = prep
-                logger.info(f"Using HPSS harmonic audio for inference. Detected Key: {prep['key']}")
             except Exception as e:
-                logger.warning(f"HPSS separation failed ({e}), falling back to direct audio.")
+                logger.warning(f"Audio pre-processing failed ({e}), using direct audio.")
 
-        # Run Basic Pitch inference
-        onset_th = self.onset_threshold if song_mode == "solo_piano" else 0.55
-        frame_th = self.frame_threshold if song_mode == "solo_piano" else 0.32
-        min_len = self.minimum_note_length_ms if song_mode == "solo_piano" else 85.0
-
+        # Always run with strict, calibrated thresholds to eliminate phantom string overtones
         model_output, midi_data, note_events = predict(
             inference_audio_path,
-            onset_threshold=onset_th,
-            frame_threshold=frame_th,
-            minimum_note_length=min_len,
+            onset_threshold=self.onset_threshold,
+            frame_threshold=self.frame_threshold,
+            minimum_note_length=self.minimum_note_length_ms,
             minimum_frequency=27.5,    # Piano A0
             maximum_frequency=4186.0   # Piano C8
         )
@@ -98,6 +90,7 @@ class BasicPitchTranscriber(BaseTranscriber):
         logger.info(f"Raw detected notes: {len(raw_notes)}")
 
         # 2. Acoustic Harmonic Overtone Suppression Filter
+        # Eliminates false octave (+12, +24) and octave-fifth (+19) harmonics caused by piano string resonance
         filtered_notes: List[dict] = []
         for i, n in enumerate(raw_notes):
             is_harmonic = False
@@ -120,6 +113,7 @@ class BasicPitchTranscriber(BaseTranscriber):
         logger.info(f"Notes after acoustic harmonic filter: {len(filtered_notes)} (removed {len(raw_notes) - len(filtered_notes)} false harmonics)")
 
         # 3. Consecutive Split-Note De-stuttering (Note Merge)
+        # Merges rapid broken re-strikes of identical key (gap < 65 ms) into smooth, continuous notes
         merged_notes: List[dict] = []
         for n in filtered_notes:
             if (
@@ -134,11 +128,8 @@ class BasicPitchTranscriber(BaseTranscriber):
 
         logger.info(f"Notes after de-stutter merge: {len(merged_notes)}")
 
-        # 4. Universal Song Arranger (Melody/Lead prioritization & Human hand polyphony limiter)
-        if song_mode in ["universal_song", "easy_tutorial"]:
-            arranged_notes_dict = SongArranger.arrange_piano_cover(merged_notes, key_info, song_mode)
-        else:
-            arranged_notes_dict = merged_notes
+        # 4. Universal Song Arranger (Melody & Hand register partitioning)
+        arranged_notes_dict = SongArranger.arrange_piano_cover(merged_notes, song_mode=song_mode)
 
         # 5. Construct final DetectedNote objects with expressive velocity curve
         detected_notes: List[DetectedNote] = []
@@ -147,12 +138,12 @@ class BasicPitchTranscriber(BaseTranscriber):
             note_duration = max(0.08, n["end"] - n["start"])
             
             # Musical velocity dynamics curve (pianissimo 30 to fortissimo 127)
-            norm_amp = min(1.0, max(0.0, (amp - 0.15) / 0.85))
-            velocity = int(np.clip(30 + (norm_amp ** 1.12) * 97, 30, 127))
+            norm_amp = min(1.0, max(0.0, (amp - 0.18) / 0.82))
+            velocity = int(np.clip(30 + (norm_amp ** 1.15) * 97, 30, 127))
             
             # Boost lead melody slightly for singing articulation
             if n.get("is_lead_melody", False):
-                velocity = min(127, velocity + 14)
+                velocity = min(127, velocity + 12)
 
             confidence = min(1.0, max(0.1, amp))
 
@@ -164,8 +155,7 @@ class BasicPitchTranscriber(BaseTranscriber):
                 velocity=velocity,
                 confidence=round(confidence, 3)
             )
-            if "hand" in n:
-                d_note.hand = n["hand"]
+            d_note.hand = n.get("hand", "right")
             detected_notes.append(d_note)
 
         # Sort notes by start_time
@@ -186,24 +176,17 @@ class BasicPitchTranscriber(BaseTranscriber):
         except Exception as e:
             logger.warning(f"Could not estimate tempo from audio: {e}")
 
-        # 7. Partition notes into Right Hand and Left Hand if not already assigned
-        unassigned = any(n.hand is None for n in detected_notes)
-        if unassigned:
-            detected_notes = HandAssigner.assign_hands(detected_notes)
-
-        # 8. Compute quality report
+        # 7. Compute quality report
         quality_report = HandAssigner.generate_quality_report(
             notes=detected_notes,
             duration=duration,
             estimated_tempo=estimated_tempo
         )
-        quality_report["model"] = "Spotify Basic Pitch + Universal Song Arranger"
+        quality_report["model"] = "Spotify Basic Pitch + Acoustic Harmonic De-resonator"
         quality_report["song_mode"] = song_mode
-        if key_info:
-            quality_report["detected_key"] = key_info["key"]
         quality_report["filtered_harmonic_overtones"] = len(raw_notes) - len(filtered_notes)
 
-        # Cleanup temporary HPSS wav
+        # Cleanup temporary audio
         if song_mode in ["universal_song", "easy_tutorial"] and inference_audio_path != audio_path:
             try:
                 os.unlink(inference_audio_path)
